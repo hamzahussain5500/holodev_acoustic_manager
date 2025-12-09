@@ -32,6 +32,7 @@ from pynput import keyboard
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 from uncertainty_utils import covariance_ellipse_points, covariance_ellipsoid_mesh
+from kalman_utils import EKF, compute_rmse
 
 
 # ============================================================
@@ -41,11 +42,16 @@ from uncertainty_utils import covariance_ellipse_points, covariance_ellipsoid_me
 # Scenario & agent configuration
 SCENARIO_NAME = "blue_rov"   # <-- set this to your scenario name
 AUV_NAME      = "auv"       # <-- AUV agent name
-USV_NAME      = "usv1"      # <-- USV agent name (with AcousticBeaconSensor)
+USV_NAME1 = "usv1"   # three surface beacons
+USV_NAME2 = "usv2"
 
 # Acoustic beacon IDs (must match scenario config)
 AUV_BEACON_ID = 0
 USV_BEACON_ID = 1
+USV_BEACON_ID2 = 2
+
+
+
 
 # Simulation timing
 DEFAULT_TICKS_PER_SEC = 30
@@ -79,7 +85,7 @@ ACOUSTIC_UPDATE_PERIOD_TICKS = 30  # ~1 second if ticks_per_sec=30
 
 # ===== Currents control =====
 USE_CURRENTS = True
-VEHICLES_FOR_CURRENTS = [AUV_NAME, USV_NAME]  # currents applied to both
+VEHICLES_FOR_CURRENTS = [AUV_NAME, USV_NAME1, USV_NAME2]  # currents applied to all
 MAP_DIMENSIONS = [100, 100, 35]
 DRAW_CURRENT_FIELD_STEP = 10
 
@@ -100,7 +106,7 @@ def vortex_field(location):
     dy = y - cy
     r = np.sqrt(dx**2 + dy**2) + 1e-6
 
-    strength = 15
+    strength = 10
     v_theta = strength / r
 
     vx = -v_theta * dy
@@ -134,110 +140,8 @@ def apply_currents(env, state, clock):
 
 
 # ============================================================
-# EKF CLASS
+# EKF CLASS (imported from kalman_utils)
 # ============================================================
-
-class EKF:
-    """
-    Simple 6D EKF:
-
-        x = [x, y, z, vx, vy, vz]^T  (world frame)
-    """
-
-    def __init__(self, dt):
-        self.dt = dt
-
-        # State
-        self.x = np.zeros(6)
-
-        # Covariance
-        self.P = np.diag([
-            P_POS_STD_INIT**2,
-            P_POS_STD_INIT**2,
-            P_POS_STD_INIT**2,
-            P_VEL_STD_INIT**2,
-            P_VEL_STD_INIT**2,
-            P_VEL_STD_INIT**2,
-        ])
-
-        # Process noise
-        self.Q = np.diag([
-            Q_POS_STD**2,
-            Q_POS_STD**2,
-            Q_POS_STD**2,
-            Q_VEL_STD**2,
-            Q_VEL_STD**2,
-            Q_VEL_STD**2,
-        ])
-
-    def predict(self, a_world):
-        """Prediction using world-frame acceleration (gravity already removed)."""
-        dt = self.dt
-
-        F = np.eye(6)
-        F[0, 3] = dt
-        F[1, 4] = dt
-        F[2, 5] = dt
-
-        B = np.zeros((6, 3))
-        B[3, 0] = dt
-        B[4, 1] = dt
-        B[5, 2] = dt
-
-        a_world = np.asarray(a_world).reshape(3,)
-
-        self.x = F @ self.x + B @ a_world
-        self.P = F @ self.P @ F.T + self.Q
-
-    def update_linear(self, z, H, R):
-        """Standard linear KF update: z = Hx + noise (DVL, Depth)."""
-        z = np.asarray(z).reshape(-1, 1)
-        H = np.asarray(H)
-        R = np.asarray(R)
-
-        x = self.x.reshape(-1, 1)
-        y = z - H @ x
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = (x + K @ y).flatten()
-        I = np.eye(self.P.shape[0])
-        self.P = (I - K @ H) @ self.P
-
-    def update_range(self, z_range, beacon_pos, R_range):
-        """
-        Nonlinear EKF update for range-only measurement:
-
-        z_range ~ || position - beacon_pos ||
-        """
-        beacon_pos = np.asarray(beacon_pos).reshape(3,)
-        px, py, pz = self.x[0:3]
-        bx, by, bz = beacon_pos
-
-        dx = px - bx
-        dy = py - by
-        dz = pz - bz
-        dist_pred = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-9
-
-        # h(x)
-        h = dist_pred
-
-        # Jacobian wrt state [x,y,z,vx,vy,vz]
-        H = np.zeros((1, 6))
-        H[0, 0] = dx / dist_pred
-        H[0, 1] = dy / dist_pred
-        H[0, 2] = dz / dist_pred
-
-        z = np.array([[z_range]])
-        Rm = np.array([[R_range]])
-
-        y = z - np.array([[h]])
-        S = H @ self.P @ H.T + Rm
-        K = self.P @ H.T @ np.linalg.inv(S)
-
-        self.x = (self.x.reshape(-1, 1) + K @ y).flatten()
-        I = np.eye(self.P.shape[0])
-        self.P = (I - K @ H) @ self.P
 
 
 # ============================================================
@@ -300,14 +204,7 @@ listener.start()
 # UTILITIES
 # ============================================================
 
-def compute_rmse(true, est):
-    """Return (total_rmse, per_axis_rmse) for arrays shape (N,3)."""
-    err = est - true
-    mse_axis = np.mean(err**2, axis=0)
-    rmse_axis = np.sqrt(mse_axis)
-    mse_total = np.mean(np.sum(err**2, axis=1))
-    rmse_total = np.sqrt(mse_total)
-    return rmse_total, rmse_axis
+# compute_rmse imported from kalman_utils
 
 
 # ============================================================
@@ -332,7 +229,7 @@ def run_ekf_with_control(use_dvl_update: bool,
     pos_covariances = []
     times = []
 
-    with holoocean.make(SCENARIO_NAME) as env:
+    with holoocean.make(SCENARIO_NAME, show_viewport = False, frames_per_sec= False) as env:
         ticks_per_sec = getattr(env, "ticks_per_sec", DEFAULT_TICKS_PER_SEC)
         dt = 1.0 / float(ticks_per_sec)
 
@@ -359,6 +256,7 @@ def run_ekf_with_control(use_dvl_update: bool,
                                           "MSG_REQX",
                                           "ping")
                 state= env.tick()
+                
                 
 
             # 3) Step environment
@@ -429,23 +327,33 @@ def run_ekf_with_control(use_dvl_update: bool,
                 # Read last acoustic message at AUV
                 if "AcousticBeaconSensor" in state[AUV_NAME]:
                     acoustic_msg = state[AUV_NAME]["AcousticBeaconSensor"]
-                    #print("getting Acoustic Message at AUV:", acoustic_msg)
                     # Expect: ["MSG_RESPX", from_id, payload, phi, theta, r, d]
                     if acoustic_msg is not None and len(acoustic_msg) >= 6:
                         msg_type = acoustic_msg[0]
-                        #print("Message type:", msg_type)
                         if msg_type == "MSG_RESPX":
+                            from_id = acoustic_msg[1]
                             r_meas = float(acoustic_msg[5])  # r
-                            print("Measured range to USV:", r_meas)
-                            # USV (beacon) position
-                            if "PoseSensor" in state[USV_NAME]:
-                                usv_pose = state[USV_NAME]["PoseSensor"]
+
+                            # Map beacon id -> USV name
+                            if from_id == USV_BEACON_ID:
+                                usv_name = USV_NAME1
+                            elif from_id == USV_BEACON_ID2:
+                                usv_name = USV_NAME2
+                            else:
+                                # fallback to first USV
+                                usv_name = USV_NAME1
+
+                            # USV (beacon) position in world frame
+                            if usv_name in state and "PoseSensor" in state[usv_name]:
+                                usv_pose = state[usv_name]["PoseSensor"]
                                 beacon_pos = usv_pose[0:3, 3]
                             else:
-                                beacon_pos = state[USV_NAME]["LocationSensor"]
+                                beacon_pos = state[usv_name]["LocationSensor"]
+
                             ekf.update_range(r_meas,
-                                             beacon_pos,
-                                             ACOUSTIC_RANGE_STD**2)
+                                            beacon_pos,
+                                            ACOUSTIC_RANGE_STD**2)
+
 
             # 10) Logging
             t = k * dt
