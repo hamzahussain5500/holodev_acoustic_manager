@@ -6,12 +6,6 @@ import argparse
 
 # Trilateration removed: this script now only collects and prints ranges from beacons.
 
-# ===== Currents control (ported from EKF.py) =====
-USE_CURRENTS = True
-MAP_DIMENSIONS = [100, 100, 35]
-DRAW_CURRENT_FIELD_STEP = 100
-VEHICLES_FOR_CURRENTS = ["auv"]  # apply currents to AUV only
-
 
 def safe_tick(env, last_state_container, retries=5, delay=0.01, show_warn=True):
     """Call env.tick() with retries on intermittent ValueError.
@@ -177,63 +171,51 @@ def run_round_robin(env, id_to_agent, beacon_positions, USV_IDS, AUV_ID, TICKS_P
     return ranges
 
 
-def vortex_field(location):
+def vortex_field(cqenter, point, strength=5.0):
+    """Return a current vector at `point` induced by a vortex centered at `center`.
+
+    - center: np.array([x,y,z]) center of vortex (AUV location)
+    - point: sequence-like [x,y,z] where we want the current
+    - strength: scalar to scale the flow magnitude
+
+    The field has strong horizontal swirl and a small vertical component.
     """
-    Example vortex-like current field in XY plane (from EKF.py).
-    Rotates around origin in XY, zero Z.
-    """
-    x, y, z = location
+    px, py, pz = point
+    cx, cy, cz = 0.0, 0.0
+    dx = px - cx
+    dy = py - cy
+    dz = pz - cz
 
-    cx, cy = 0.0, 0.0
-    dx = x - cx
-    dy = y - cy
-    r = np.sqrt(dx**2 + dy**2) + 1e-6
+    # ignore points above surface (z>0)
+    if pz > 0:
+        return [0.0, 0.0, 0.0]
 
-    strength = 10
-    v_theta = strength / r
+    # horizontal distance squared (avoid div by zero)
+    r2 = dx * dx + dy * dy + 1e-6
 
-    vx = -v_theta * dy
-    vy =  v_theta * dx
-    vz = 0.0
+    # simple vortex: tangential velocity ~ strength / r
+    vx = -dy / r2 * strength
+    vy = dx / r2 * strength
 
-    return np.array([vx, vy, vz], dtype=float)
+    # vertical component small, decays with radius
+    vz = 0.2 * np.cos(0.1 * r2) * (1.0 / (1.0 + 0.1 * abs(dz)))
 
-
-def apply_currents(env, state, clock):
-    """Apply currents to vehicles if USE_CURRENTS is True (AUV only)."""
-    if not USE_CURRENTS:
-        return
-
-    if clock == DRAW_CURRENT_FIELD_STEP:
-        env.draw_debug_vector_field(
-            vortex_field,
-            location=[0, 0, 0],
-            vector_field_dimensions=MAP_DIMENSIONS,
-            arrow_thickness=7,
-            arrow_size=.25,
-            spacing=3
-        )
-
-    for vehicle in VEHICLES_FOR_CURRENTS:
-        sensors = state.get(vehicle, {})
-        if isinstance(sensors, dict) and "LocationSensor" in sensors:
-            location = sensors["LocationSensor"]
-            current_velocity = vortex_field(location)
-            env.set_ocean_currents(vehicle, current_velocity)
+    # clamp or scale down so values are reasonable for env.set_ocean_currents
+    return [vx, vy, vz]
 
 
-def main(loop=True, num_usvs=4):
+def main(loop=True):
     # Static positions taken from your usv_auv JSON (world coordinates)
     static_agent_positions = {
-        "usv1": np.array([0.0,  -660.0,   0.0]),
-        "usv2": np.array([10.0, -660.0,   0.0]),
-        "usv3": np.array([5.0,  -651.0,   0.0]),
-        "usv4": np.array([5.0,  -657.0,  -2.0]),
-        "auv":  np.array([5,  -5,  -10.0]),
+        "usv1": np.array([10.0,  10.0,   -1]),
+        "usv2": np.array([0.0, 0.0,   -1]),
+       # "usv3": np.array([5.0,  -651.0,   0.0]),
+        #"usv4": np.array([5.0,  -657.0,  -2.0]),
+        "auv":  np.array([-5,  -5,  -15.0]),
     }
 
     # Create the environment once, then use functions to operate on it
-    with holoocean.make("usv_auv") as env:
+    with holoocean.make("blue_rov", show_viewport=False, frames_per_sec=False) as env:
         print("=== env.info() ===")
         print(env.info())
         print("==================")
@@ -251,10 +233,6 @@ def main(loop=True, num_usvs=4):
         print("Beacon IDs list from env.beacons_id:", getattr(env, "beacons_id", None))
         print("Using beacon ID", AUV_ID, "as AUV sender (agent=", id_to_agent.get(AUV_ID, 'unknown'), ")")
 
-        # Limit how many USVs to range based on CLI (1..4)
-        selected_usv_ids = sorted(USV_IDS)[:max(1, min(int(num_usvs), 4))]
-        print(f"Targeting {len(selected_usv_ids)} USV beacons: {selected_usv_ids}")
-
         try:
             # Run at least once; if loop=True, run repeatedly until Ctrl-C
             # prepare vehicles list (agent names) for applying currents
@@ -262,16 +240,40 @@ def main(loop=True, num_usvs=4):
             if 'auv' not in vehicles and AUV_ID in id_to_agent:
                 vehicles.append(id_to_agent[AUV_ID])
 
-            clock = 0
+            debug_draw_counter = 0
             while True:
                 # Step once to get current AUV location and apply currents
                 last_state = [{}]
                 state = safe_tick(env, last_state)
-                clock += 1
-                apply_currents(env, state, clock)
+
+                # Get AUV location (if available) to center the vortex
+                auv_loc = None
+                if isinstance(state, dict) and 'auv' in state and isinstance(state['auv'], dict):
+                    auv_loc = state['auv'].get('LocationSensor')
+
+                if auv_loc is not None:
+                    center = np.array(auv_loc, dtype=float)
+
+                    # draw debug vector field around AUV periodically
+                    debug_draw_counter += 1
+                    if debug_draw_counter % 50 == 0:
+                        # vector field dimensions: x,y = 100 m, z = 10 m
+                        env.draw_debug_vector_field(lambda loc: vortex_field(center, loc), location=center.tolist(), vector_field_dimensions=[100, 100, 10], arrow_thickness=4, arrow_size=0.25, spacing=5)
+
+                    # apply currents to all known vehicles using their LocationSensor
+                    for vehicle in vehicles:
+                        try:
+                            veh_loc = state.get(vehicle, {}).get('LocationSensor')
+                            if veh_loc is None:
+                                continue
+                            current_velocity = vortex_field(center, veh_loc)
+                            env.set_ocean_currents(vehicle, current_velocity)
+                        except Exception:
+                            # ignore vehicles without LocationSensor or other issues
+                            continue
 
                 # Now run the round-robin ranging (it will advance the sim internally)
-                ranges = run_round_robin(env, id_to_agent, beacon_positions, selected_usv_ids, AUV_ID, TICKS_PER_SEC)
+                ranges = run_round_robin(env, id_to_agent, beacon_positions, USV_IDS, AUV_ID, TICKS_PER_SEC)
 
                 # Print collected ranges for inspection
                 if ranges:
@@ -279,11 +281,6 @@ def main(loop=True, num_usvs=4):
                     for bid in sorted(ranges.keys()):
                         agent = id_to_agent.get(bid, f"id={bid}")
                         print(f"  Beacon {bid} ({agent}): {ranges[bid]:.2f} m")
-
-                    # Build and print a dynamic list aligned to the selected USV beacons order
-                    ranges_list = [ranges.get(bid) for bid in selected_usv_ids]
-                    print(f"\n[RESULT] Ranges list ({len(ranges_list)} beacons, order={selected_usv_ids}):")
-                    print(ranges_list)
 
                 if not loop:
                     break
@@ -296,11 +293,9 @@ def main(loop=True, num_usvs=4):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Collect acoustic ranges from USV beacons in HoloOcean")
+    parser = argparse.ArgumentParser(description="Run 4-range trilateration using HoloOcean acoustic messages")
     parser.add_argument("--loop", action="store_true", help="Run round-robin continuously until Ctrl-C")
-    parser.add_argument("--num-usvs", type=int, choices=[1, 2, 3, 4], default=4,
-                        help="Number of USVs to range (1..4)")
     args = parser.parse_args()
-    main(loop=args.loop, num_usvs=args.num_usvs)
+    main(loop=args.loop)
 
 # End of script
