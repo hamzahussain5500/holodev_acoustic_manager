@@ -1,5 +1,4 @@
 """
-EKF FUSION OF IMU, DVL, DEPTH, ACOUSTIC IN HOLOOCEAN
 ----------------------------------------------------
 
 Compares four configurations:
@@ -8,8 +7,6 @@ Compares four configurations:
 2) IMU + DVL
 3) IMU + DVL + Depth
 4) IMU + DVL + Depth + Acoustic Range
-
-Uses:
 - PoseSensor  -> ground truth pose, rotation
 - IMUSensor   -> acceleration (prediction)
 - DVLSensor   -> velocity (update)
@@ -40,23 +37,25 @@ from kalman_utils import EKF, compute_rmse
 # ============================================================
 
 # Scenario & agent configuration
-SCENARIO_NAME = "blue_rov"   # <-- set this to your scenario name
-AUV_NAME      = "auv"       # <-- AUV agent name
-USV_NAME = "usv1"   # three surface beacons
+SCENARIO_NAME = "blue_rov"   # set this to your scenario name
+AUV_NAME      = "auv"
+USV_1_NAME    = "usv1"
+USV_2_NAME    = "usv2"
+USV_3_NAME    = "usv3"
+USV_4_NAME    = "usv4"
 
 # Acoustic beacon IDs (must match scenario config)
-AUV_BEACON_ID = 0
-USV_BEACON_ID = 1
-
+AUV_BEACON_ID    = 0
+USV_BEACON_ID_1  = 1
+USV_BEACON_ID_2  = 2
+USV_BEACON_ID_3  = 3
+USV_BEACON_ID_4  = 4
 
 
 
 # Simulation timing
 DEFAULT_TICKS_PER_SEC = 30
-SIM_DURATION_SEC = 20.0      # total simulation length in seconds
-
-# Keyboard/thruster control
-BASE_THRUSTER_FORCE = 15.0   # magnitude of command applied by each key
+SIM_DURATION_SEC = 180.0      # total simulation length in seconds
 
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
@@ -83,9 +82,9 @@ ACOUSTIC_UPDATE_PERIOD_TICKS = 30  # ~1 second if ticks_per_sec=30
 
 # ===== Currents control =====
 USE_CURRENTS = True
-VEHICLES_FOR_CURRENTS = [AUV_NAME, USV_NAME]  # currents applied to both
+VEHICLES_FOR_CURRENTS = [AUV_NAME]  # currents applied to both
 MAP_DIMENSIONS = [100, 100, 35]
-DRAW_CURRENT_FIELD_STEP = 100
+DRAW_CURRENT_FIELD_STEP = 1
 
 
 # ============================================================
@@ -93,25 +92,18 @@ DRAW_CURRENT_FIELD_STEP = 100
 # ============================================================
 
 def vortex_field(location):
-    """
-    Example vortex-like current field in XY plane.
-    Replace with your own current model if desired.
-    """
+    """Vortex field with vertical component (from currents.py logic)."""
     x, y, z = location
+    if z > 0:
+        return np.array([0.0, 0.0, 0.0], dtype=float)
 
-    cx, cy = 0.0, 0.0
-    dx = x - cx
-    dy = y - cy
-    r = np.sqrt(dx**2 + dy**2) + 1e-6
+    strength = 10.0
+    r_squared = x**2 + y**2 + 1e-5  # avoid divide by zero
+    dx = -y / r_squared * strength
+    dy =  x / r_squared * strength
+    dz = 0.2 * np.cos(0.1 * r_squared)
 
-    strength = 10
-    v_theta = strength / r
-
-    vx = -v_theta * dy
-    vy =  v_theta * dx
-    vz = 0.0
-
-    return np.array([vx, vy, vz], dtype=float)
+    return np.array([3*dx, 3*dy, 3*dz], dtype=float)
 
 
 def apply_currents(env, state, clock):
@@ -125,8 +117,9 @@ def apply_currents(env, state, clock):
             location=[0, 0, 0],
             vector_field_dimensions=MAP_DIMENSIONS,
             arrow_thickness=7,
-            arrow_size=.25,
-            spacing=3
+            arrow_size= 0.5,
+            spacing=3,
+            lifetime=0
         )
 
     for vehicle in VEHICLES_FOR_CURRENTS:
@@ -144,62 +137,6 @@ def apply_currents(env, state, clock):
 
 
 # ============================================================
-# KEYBOARD CONTROL
-# ============================================================
-
-pressed_keys = set()
-
-
-def on_press(key):
-    if hasattr(key, "char") and key.char is not None:
-        pressed_keys.add(key.char)
-
-
-def on_release(key):
-    if hasattr(key, "char") and key.char is not None:
-        pressed_keys.discard(key.char)
-
-
-def parse_keys(keys, val):
-    """Convert pressed keys into 8D thruster command vector."""
-    command = np.zeros(8)
-
-    # forward/back
-    if "i" in keys:
-        command[0:4] += val
-    if "k" in keys:
-        command[0:4] -= val
-
-    # yaw
-    if "j" in keys:
-        command[[4, 7]] += 0.25 * val
-        command[[5, 6]] -= 0.25 * val
-    if "l" in keys:
-        command[[4, 7]] -= 0.25 * val
-        command[[5, 6]] += 0.25 * val
-
-    # vertical thrust
-    if "w" in keys:
-        command[4:8] += val
-    if "s" in keys:
-        command[4:8] -= val
-
-    # roll
-    if "a" in keys:
-        command[[4, 6]] += val
-        command[[5, 7]] -= val
-    if "d" in keys:
-        command[[4, 6]] -= val
-        command[[5, 7]] += val
-
-    return command
-
-
-listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-listener.start()
-
-
-# ============================================================
 # UTILITIES
 # ============================================================
 
@@ -212,14 +149,14 @@ listener.start()
 
 def run_ekf_with_control(use_dvl_update: bool,
                          use_depth_update: bool,
-                         use_acoustic_update: bool):
+                         use_acoustic_update_1: bool):
     """
     Run one experiment with chosen sensor combo.
 
     Flags:
     - use_dvl_update      -> include DVL velocity corrections
     - use_depth_update    -> include Depth z update
-    - use_acoustic_update -> include range update to USV
+    - use_acoustic_update_1 -> include range update to USV
     """
     true_positions = []
     est_positions = []
@@ -227,6 +164,8 @@ def run_ekf_with_control(use_dvl_update: bool,
     est_velocities = []
     pos_covariances = []
     times = []
+
+
 
     with holoocean.make(SCENARIO_NAME, show_viewport = False, frames_per_sec= False) as env:
         ticks_per_sec = getattr(env, "ticks_per_sec", DEFAULT_TICKS_PER_SEC)
@@ -238,25 +177,41 @@ def run_ekf_with_control(use_dvl_update: bool,
         prev_true_pos = None
         clock = 0
 
+
         for k in range(n_steps):
             clock += 1
-
-            # 1) Apply keyboard control to AUV
-            command = parse_keys(pressed_keys, BASE_THRUSTER_FORCE)
-            env.act(AUV_NAME, command)
+            r_meas_1 = None
+            beacon_1_pos = None
+            # Initialize acoustic measurement placeholders for this tick
 
             state = env.tick()
 
 
-            # 2) Optionally send acoustic ping from USV -> AUV
-            if use_acoustic_update and (k % ACOUSTIC_UPDATE_PERIOD_TICKS == 0):
+            # 2) Optionally send acoustic ping from USV_1 -> AUV
+            
+            if use_acoustic_update_1 and (k % ACOUSTIC_UPDATE_PERIOD_TICKS == 0):
                 env.send_acoustic_message(AUV_BEACON_ID,
-                                          USV_BEACON_ID,
+                                          USV_BEACON_ID_1,
                                           "MSG_REQX",
                                           "ping")
                 state= env.tick()
-                
-                
+
+            if use_acoustic_update_1:
+                # Read last acoustic message at AUV
+                if "AcousticBeaconSensor" in state[AUV_NAME]:
+                    acoustic_msg = state[AUV_NAME]["AcousticBeaconSensor"]
+                    # Expect: ["MSG_RESPX", from_id, payload, phi, theta, r, d]
+                    if acoustic_msg is not None and len(acoustic_msg) >= 6:
+                        msg_type = acoustic_msg[0]
+                        if msg_type == "MSG_RESPX" and acoustic_msg[1] == USV_BEACON_ID_1:
+                            r_meas_1 = float(acoustic_msg[5])
+                            print(r_meas_1)
+                            # USV (beacon) position in world frame
+                            if "PoseSensor" in state[USV_1_NAME]:
+                                usv_1_pose = state[USV_1_NAME]["PoseSensor"]
+                                beacon_1_pos = usv_1_pose[0:3, 3]
+                            else:
+                                beacon_1_pos = state[USV_1_NAME]["LocationSensor"]
 
             # 3) Step environment
 
@@ -295,6 +250,7 @@ def run_ekf_with_control(use_dvl_update: bool,
             ekf.predict(a_world)
 
             # 7) DVL update
+            # 7) DVL update (DVL reports world-frame velocity)
             if use_dvl_update:
                 v_body = dvl[0:3]
                 v_world_meas = R_ws @ v_body
@@ -321,28 +277,15 @@ def run_ekf_with_control(use_dvl_update: bool,
                 R_depth = np.array([[DEPTH_STD**2]])
                 ekf.update_linear(z_vec, H_depth, R_depth)
 
-            # 9) Acoustic range update (nonlinear EKF)
-            if use_acoustic_update:
-                # Read last acoustic message at AUV
-                if "AcousticBeaconSensor" in state[AUV_NAME]:
-                    acoustic_msg = state[AUV_NAME]["AcousticBeaconSensor"]
-                    # Expect: ["MSG_RESPX", from_id, payload, phi, theta, r, d]
-                    if acoustic_msg is not None and len(acoustic_msg) >= 6:
-                        msg_type = acoustic_msg[0]
-                        if msg_type == "MSG_RESPX":
-                            r_meas = float(acoustic_msg[5]) # r
-                            print (r_meas)
-
-                            # USV (beacon) position in world frame
-                            if "PoseSensor" in state[USV_NAME]:
-                                usv_pose = state[USV_NAME]["PoseSensor"]
-                                beacon_pos = usv_pose[0:3, 3]
-                            else:
-                                beacon_pos = state[USV_NAME]["LocationSensor"]
-
-                            ekf.update_range(r_meas,
-                                            beacon_pos,
-                                            ACOUSTIC_RANGE_STD**2)
+            # 9) Acoustic_1 range update (nonlinear EKF)
+            
+            # Only perform acoustic update if a valid measurement was received
+            if use_acoustic_update_1 and (r_meas_1 is not None) and (beacon_1_pos is not None):
+                ekf.update_range(r_meas_1,
+                                 beacon_1_pos,
+                                 ACOUSTIC_RANGE_STD**2)
+                
+            
 
 
             # 10) Logging
@@ -365,9 +308,9 @@ def run_ekf_with_control(use_dvl_update: bool,
 
 
 def main():
-
-    # ----- RUN 4: IMU + DVL + Depth + Acoustic -----
-    print("\nRunning EKF with IMU + DVL + Depth + Acoustic...")
+    
+    # ----- RUN 4: IMU + DVL + Depth + Acoustic_1 -----
+    print("\nRunning EKF with IMU + DVL + Depth + Acoustic_1...")
     (t_dda,
      true_pos_dda,
      est_pos_dda,
@@ -376,7 +319,7 @@ def main():
      Ppos_dda) = run_ekf_with_control(
         use_dvl_update=True,
         use_depth_update=True,
-        use_acoustic_update=True
+        use_acoustic_update_1=True
     )
     # ----- RUN 1: IMU-only -----
     print("\nRunning EKF with IMU ONLY...")
@@ -388,7 +331,7 @@ def main():
      Ppos_imu) = run_ekf_with_control(
         use_dvl_update=False,
         use_depth_update=False,
-        use_acoustic_update=False
+        use_acoustic_update_1=False
     )
 
     # ----- RUN 2: IMU + DVL -----
@@ -401,7 +344,7 @@ def main():
      Ppos_dvl) = run_ekf_with_control(
         use_dvl_update=True,
         use_depth_update=False,
-        use_acoustic_update=False
+        use_acoustic_update_1=False
     )
 
     # ----- RUN 3: IMU + DVL + Depth -----
@@ -414,7 +357,7 @@ def main():
      Ppos_dd) = run_ekf_with_control(
         use_dvl_update=True,
         use_depth_update=True,
-        use_acoustic_update=False
+        use_acoustic_update_1=False
     )
 
 
@@ -435,7 +378,7 @@ def main():
     print_metrics("IMU ONLY", true_pos_imu, est_pos_imu, true_vel_imu, est_vel_imu)
     print_metrics("IMU + DVL", true_pos_dvl, est_pos_dvl, true_vel_dvl, est_vel_dvl)
     print_metrics("IMU + DVL + Depth", true_pos_dd, est_pos_dd, true_vel_dd, est_vel_dd)
-    print_metrics("IMU + DVL + Depth + Acoustic", true_pos_dda, est_pos_dda, true_vel_dda, est_vel_dda)
+    print_metrics("IMU + DVL + Depth + Acoustic_1", true_pos_dda, est_pos_dda, true_vel_dda, est_vel_dda)
     print("================================================\n")
 
     chi2_2d_95 = 5.991
@@ -452,7 +395,7 @@ def main():
     plt.plot(est_pos_dd[:, 0], est_pos_dd[:, 1],
              "--", label="EKF IMU + DVL + Depth", color="blue")
     plt.plot(est_pos_dda[:, 0], est_pos_dda[:, 1],
-             "--", label="EKF IMU+DVL+Depth+Acoustic", color="purple")
+             "--", label="EKF IMU+DVL+Depth+Acoustic_1", color="purple")
 
     num_ellipses = 4
     idxs_imu = np.linspace(0, len(est_pos_imu) - 1, num_ellipses, dtype=int)

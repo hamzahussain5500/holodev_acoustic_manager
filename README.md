@@ -1,80 +1,128 @@
-# holodev
+# HoloOcean EKF + Acoustic Ranging Workspace
 
-This repository contains examples and experiments using HoloOcean (AUV/USV simulator) with
-EKF-based sensor fusion and small utility scripts. The main code for filtering and
-experiments lives in the `klamaning/` folder.
+This workspace implements an Extended Kalman Filter (EKF) for an AUV in HoloOcean, fusing IMU, DVL, Depth, and Acoustic range measurements. It includes a reusable acoustic ranging utility and five comparable experiment runs to quantify the effect of different sensor combinations.
 
-**Project highlights**
-- **EKF experiments:** Multi-sensor EKF fusion (IMU, DVL, Depth, Acoustic) with visualization.
-- **Interactive control:** Keyboard thruster control examples for manually driving agents in-sim.
-- **Utilities & examples:** Helper functions for uncertainty visualization and various HoloOcean examples.
+## Repository Layout
+- `kalmaning/current_acoustic_EKF_patched.py`: Main EKF runner, keyboard control, plotting, and scenario orchestration. Compares five configurations.
+- `kalmaning/kalman_utils.py`: Shared EKF utilities (EKF class, RMSE helper).
+- `kalmaning/four_ranges.py`: Importable acoustic ranging utility (`collect_acoustic_ranges`) + robust `safe_tick`.
+- Other top-level scripts (e.g., `examples.py`, `manual.py`) are unrelated demos.
 
-**Contents**
-- **`klamaning/`**: main experiments and utilities
-	- `currents.py` — full EKF demo comparing 4 sensor configurations (IMU / IMU+DVL / IMU+DVL+Depth / IMU+DVL+Depth+Acoustic). Produces trajectory plots and uncertainty visualizations.
-	- `compare.py` — simpler IMU vs IMU+DVL comparison with RMSE and plots.
-	- `imu.py` — small example that reads IMU, logs acceleration history and saves `accel_history.csv` + `accel_plot.png`.
-	- `uncertainty_utils.py` — helpers for covariance ellipses/ellipsoids used by plotting code.
-	- `ekf.ipynb`, `imu_dvl.ipynb` — notebooks for interactive analysis.
-- Top-level scripts: quick examples and scenarios
-	- `examples.py` — assorted HoloOcean usage examples and dynamics demos.
-	- `currents.py`, `kalmaning.py`, `manual.py`, `try.py` — small demos for currents, keyboard control, acoustic messages.
-	- `four_ranges.py`, `accel_history.csv` — other utilities and sample data.
+## Scenario Requirements
+The code assumes a HoloOcean scenario named `usv_auv` with:
+- AUV agent name `auv` with Acoustic Beacon ID `0`.
+- USV agents:
+  - `usv1` with Acoustic Beacon ID `1`
+  - `usv2` with Acoustic Beacon ID `2`
+- Sensors on AUV: `IMUSensor`, `DVLSensor`, `DepthSensor`, `PoseSensor`, `AcousticBeaconSensor`.
+- Sensors on USVs: `PoseSensor` or `LocationSensor` (for beacon position), `AcousticBeaconSensor`.
 
-**Requirements**
-- **Python:** 3.8+ recommended
-- **Key packages:** `holoocean`, `numpy`, `matplotlib`, `pynput`.
-- Install (example):
+Update `SCENARIO_NAME`, agent names, and beacon IDs in `kalmaning/current_acoustic_EKF_patched.py` if your scenario differs.
 
+## Dependencies
+- Python 3.9+
+- `holoocean` (environment, agents, sensors)
+- `numpy`, `matplotlib`, `pynput`
+
+Install:
 ```bash
 pip install numpy matplotlib pynput
-# Install HoloOcean per its docs (may be via pip or local package/setup specific to your environment)
+# Install HoloOcean per official docs (varies by platform)
 ```
 
-Note: `holoocean` is an external simulator — follow its installation and scenario setup instructions before running the examples.
+## How It Works
+### EKF State and Updates (`kalman_utils.py`)
+- State: 6D `[x, y, z, vx, vy, vz]`.
+- Predict: converts IMU body acceleration to world frame, subtracts gravity, integrates motion.
+- Linear updates:
+  - DVL: body-frame velocity → world-frame via pose rotation; updates `[vx, vy, vz]`.
+  - Depth: updates `z`.
+- Nonlinear update:
+  - Acoustic range: scalar distance to a known beacon position; standard EKF range measurement update.
+- `compute_rmse(true, est)` reports total and per-axis RMSE for positions/velocities.
 
-**Quick start**
-- Run the main EKF comparison (full demo):
+### Acoustic Ranging and Scheduling (`current_acoustic_EKF_patched.py`)
+- Periodic non-blocking ranging via an internal round-robin scheduler; sends `MSG_REQX` only when modems are idle.
+- Single-tick discipline: exactly one `env.tick()` per EKF iteration; acoustic send/poll does not call `tick()` internally.
+- On `MSG_RESPX`, parses range and fuses with `ekf.update_range(range_m, beacon_pos, R)` using the USV’s current position.
+- Optional utility `kalmaning/four_ranges.py` remains available for standalone ranging helpers, but the main script uses its own scheduler.
 
+### Currents Model (`current_acoustic_EKF_patched.py`)
+- `vortex_field(location)`: XY swirl field used as example ocean current.
+- `apply_currents(env, state, clock)`: applies currents to vehicles listed in `VEHICLES_FOR_CURRENTS` (default AUV only). Draws a debug vector field once.
+
+### Keyboard Control (`current_acoustic_EKF_patched.py`)
+- `i/k`: forward/backward
+- `j/l`: yaw
+- `w/s`: vertical thrust
+- `a/d`: roll
+
+## Experiments (`current_acoustic_EKF_patched.py`)
+`main()` runs five configurations via `run_ekf_with_control`:
+1. IMU-only
+2. IMU + DVL
+3. IMU + DVL + Depth
+4. IMU + DVL + Depth + Acoustic_1 (one beacon)
+5. IMU + DVL + Depth + Acoustic_2 (two beacons)
+
+Acoustic flags and blocks:
+- `use_acoustic_update_1`: Collects a single range (`num_targets=1`) from `USV_BEACON_ID` (usv1).
+- `use_acoustic_update_2`: Collects two ranges (`num_targets=2`) from `[USV_BEACON_ID, USV2_BEACON_ID]` (usv1 + usv2), with `max_wait_seconds` and `cooldown_ticks` tuned to reduce overlap.
+
+Outputs:
+- Printed metrics (RMSE, final position error) per configuration.
+- Plots: XY trajectory + uncertainty ellipses; Z vs time; Position error vs time; 3D uncertainty “bubble” per configuration.
+
+## Running the Experiments
+From workspace root:
 ```bash
-python klamaning/currents.py
+python3 kalmaning/current_acoustic_EKF_patched.py
 ```
+The script disables HoloOcean viewport (`show_viewport=False`), relies on keyboard inputs, and shows plots at the end.
 
-- Run the lighter comparison (IMU vs IMU+DVL):
-
+## CLI Usage
+- Run default:
 ```bash
-python klamaning/compare.py
+python3 kalmaning/current_acoustic_EKF_patched.py
 ```
-
-- Collect IMU acceleration history + plot:
-
+- Target specific USVs (repeatable):
 ```bash
-python klamaning/imu.py
-# produces `accel_history.csv` and `accel_plot.png`
+python3 kalmaning/current_acoustic_EKF_patched.py --target-name usv1 --target-name usv3
+```
+- Verbose modem/ranging logs:
+```bash
+python3 kalmaning/current_acoustic_EKF_patched.py --verbose
 ```
 
-**Keyboard controls (common mapping)**
-- **Forward / Back:** `i` / `k` (applies forward/back thrust)
-- **Yaw left / right:** `j` / `l`
-- **Up / Down (vertical):** `w` / `s`
-- **Roll left / right:** `a` / `d`
-- **Quit example loops:** typically `q` (varies by script)
+## Configuration
+- Scenario and agents: `SCENARIO_NAME`, `AUV_NAME`, `USV_1_NAME`..`USV_4_NAME`.
+- Acoustic IDs and scheduling: `AUV_BEACON_ID`, `USV_BEACON_ID_1..4`, `ACOUSTIC_UPDATE_PERIOD_TICKS`, `timeout_ticks`.
+- Noise levels: process `Q_POS_STD`, `Q_VEL_STD`; initial covariance `P_POS_STD_INIT`, `P_VEL_STD_INIT`; DVL `DVL_VEL_STD`; Depth `DEPTH_STD`; Acoustic `ACOUSTIC_RANGE_STD`.
+- Currents: toggle `USE_CURRENTS`, vehicles `VEHICLES_FOR_CURRENTS`, field parameters in `vortex_field()`.
 
-**Configuration tips**
-- Many scripts use the `SCENARIO_NAME` or hard-coded scenario like `blue_rov` or `usv_auv`. Edit the top of the script if your scenario name differs.
-- Noise / filter parameters are tunable constants near the top of the EKF scripts (`Q_*`, `P_*`, `*_STD` values).
+## Inputs & Outputs
+- Inputs (HoloOcean sensors): `IMUSensor`, `DVLSensor`, `DepthSensor`, `PoseSensor`, `LocationSensor`, `AcousticBeaconSensor`.
+- Console outputs: position/velocity RMSE (total and per-axis), final position error.
+- Figures: XY with 95% covariance ellipses, Z vs time, position error vs time, final 3D uncertainty ellipsoid.
 
-**Outputs**
-- `accel_history.csv` — example saved in the repo (produced by `klamaning/imu.py` when run).
-- Plots — scripts call `matplotlib.pyplot.show()` and may save figures (e.g., `accel_plot.png`).
+## Troubleshooting
+- No beacons: if selected USV beacons aren’t present in the scenario, acoustic fusion is auto-disabled; verify `env.beacons_id`.
+- Modem busy: sends are skipped unless both modems are idle; use `--verbose` to inspect statuses and timeouts.
+- Time sync: do not add `env.tick()` calls inside acoustic logic; the scheduler adheres to single-tick updates.
+- Currents: disable `USE_CURRENTS` for an unforced trajectory if needed.
 
-**Notebooks**
-- `klamaning/ekf.ipynb` and `klamaning/imu_dvl.ipynb` are available for interactive exploration and visualizing results.
+## Future Work
+- CLI flags: expose configuration toggles (enable/disable DVL/Depth/Acoustic, set periods, waits).
+- Multi-beacon scheduling: formalize a scheduler to interleave targets without overlap; add diagnostics on acoustic channel state.
+- Data logging: export CSV of measurements, states, and covariances for offline analysis.
+- Sensor models: tune noise parameters and include IMU bias estimation.
+- Triangulation: with two ranges, optionally perform multi-lateration or batch updates in the EKF for stronger constraints.
+- Tests: add unit and integration tests for `collect_acoustic_ranges` timing and EKF update correctness.
 
-**Contributing / next steps**
-- If you want, I can:
-	- run a smoke test (if `holoocean` is installed here),
-	- add a `requirements.txt` or `pyproject.toml`,
-	- standardize scenario configuration into a single config file.
+## Contribution Notes
+- Keep changes minimal and focused; follow current style.
+- When adding sensors or beacons, update mappings in `current_acoustic_EKF_patched.py` and scenario.
+- Prefer modifying `collect_acoustic_ranges` for messaging/timing improvements rather than duplicating logic.
 
-If you'd like any of those, tell me which and I will proceed.
+---
+If you want, we can implement the staggered scheduling and pre-ping idle in code to fully suppress the “still transmitting” warning.
