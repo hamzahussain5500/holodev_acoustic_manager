@@ -96,3 +96,32 @@ def covariance_ellipsoid_mesh(P_3x3, mean_xyz, chi2_val=7.815, num_u=20, num_v=2
     Z = ellipsoid_global[2, :, :] + mean_xyz[2]
 
     return X, Y, Z
+
+
+def axis_uncertainty_bounds(P_3x3, mean_xyz, chi2_val=3.841):
+    """
+    Compute 1D positional bounds (x,y,z) at a chosen chi-square level.
+
+    Parameters
+    ----------
+    P_3x3 : (3,3) ndarray
+        Covariance of [x,y,z].
+    mean_xyz : (3,) array_like
+        Mean position.
+    chi2_val : float
+        Chi-square threshold for 1 dof (default 95% ≈ 3.841).
+
+    Returns
+    -------
+    centers : (3,) ndarray
+        Mean position components.
+    half_widths : (3,) ndarray
+        Half-widths for each axis (sqrt(var * chi2_val)).
+    labels : tuple
+        Axis labels ("x", "y", "z").
+    """
+    P_3x3 = np.asarray(P_3x3)
+    mean_xyz = np.asarray(mean_xyz)
+    variances = np.diag(P_3x3)
+    half_widths = np.sqrt(variances * chi2_val)
+    return mean_xyz, half_widths, ("x", "y", "z")

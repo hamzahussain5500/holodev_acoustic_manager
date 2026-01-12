@@ -3,30 +3,15 @@ import numpy as np
 import time
 import argparse
 import matplotlib.pyplot as plt
-from kalman_utils import EKF, compute_rmse
-from uncertainty_utils import (
-    covariance_ellipse_points,
-    covariance_ellipsoid_mesh,
-    axis_uncertainty_bounds,
-)
-from validation_metrics import (
-    calculate_nees,
-    nees_consistency_test,
-    calculate_nis,
-    nis_consistency_test,
-)
+from kalman_utils_patched import EKF, compute_rmse
+from uncertainty_utils import covariance_ellipse_points, covariance_ellipsoid_mesh
 
-
-# Sensor rates (Hz) - must match your scenario JSON
-IMU_HZ   = 100   # same as ticks_per_sec
-DVL_HZ   = 20
-DEPTH_HZ = 50
 
 
 # EKF fusion script: IMU + DVL + Depth + Acoustic range (optional range logging).
 
 # ===== Scenario & agent configuration (global assignments) =====
-SCENARIO_NAME = "usv_auv_100_imu"   # <-- set this to your scenario name
+SCENARIO_NAME = "usv_auv"   # <-- set this to your scenario name
 AUV_NAME      = "auv"        # <-- AUV agent name
 USV_1_NAME    = "usv1"       # <-- surface beacons
 USV_2_NAME    = "usv2"
@@ -43,43 +28,58 @@ USV_BEACON_ID_4      = 4
 
 
 # Simulation timing
-DEFAULT_TICKS_PER_SEC = 100
-SIM_DURATION_SEC = 600.0
+DEFAULT_TICKS_PER_SEC = 30
+SIM_DURATION_SEC = 300.0
 
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
 
+# ===== IMU Allan-variance derived noise (from your analysis) =====
+# Assumption: 'noise_density' is in units per sqrt(Hz) (e.g., m/s^2/√Hz for accel).
+# Convert to per-sample 1-sigma using a one-sided PSD approximation:
+#   sigma_sample ≈ noise_density * sqrt(fs/2)
+IMU_UPDATE_HZ = 30.0
+ACC_NOISE_DENSITY = 0.0001689249314826855   # [m/s^2 / sqrt(Hz)]
+ACC_RANDOM_WALK   = 0.007686829585858951  # [m/s^2 / sqrt(s)] (assumed)
+
+GYRO_NOISE_DENSITY = 0.046086085569855176  # [rad/s / sqrt(Hz)] (unused unless estimating attitude)
+GYRO_RANDOM_WALK   = 0.021428318968378924  # [rad/s / sqrt(s)] (unused unless estimating attitude)
+
+# Effective accel white-noise std per sample (used to build Q)
+ACC_SIGMA_SAMPLE = ACC_NOISE_DENSITY * np.sqrt(IMU_UPDATE_HZ / 2.0)
+
+
 # EKF process noise (Q)
-Q_POS_STD = 0.0
-Q_VEL_STD = 0.085
+Q_POS_STD = 0.03
+Q_VEL_STD = 0.15
 
 # EKF initial covariance (P)
 P_POS_STD_INIT = 1.0
 P_VEL_STD_INIT = 1.0
 
 # DVL measurement noise (R)
-DVL_VEL_STD = 0.24
+DVL_VEL_STD = 0.1
 
 # Depth measurement noise (R_depth)
-DEPTH_STD = 0.03
+DEPTH_STD = 0.3
 
 # Acoustic range noise (R_range)
-ACOUSTIC_RANGE_STD = 0.1
+ACOUSTIC_RANGE_STD = 0.3
 
 # Acoustic ping interval (in ticks)
-ACOUSTIC_UPDATE_PERIOD_TICKS = 100  # ~1 second if ticks_per_sec=100
+ACOUSTIC_UPDATE_PERIOD_TICKS = 30  # ~1 second if ticks_per_sec=30
 
 # ===== Currents control =====
 USE_CURRENTS = True
 VEHICLES_FOR_CURRENTS = [AUV_NAME]
-MAP_DIMENSIONS = [100, 100, 25]
+MAP_DIMENSIONS = [100, 100, 35]
 DRAW_CURRENT_FIELD_STEP = 100
 
 # ===== Waypoint navigation (6-DOF targets) =====
 # The vehicle tracks XY waypoints at a fixed depth. Yaw is steered to face the
 # incoming current (upstream) when a measurable current exists; otherwise it
 # faces the active waypoint.
-TARGET_Z = -15.0
+TARGET_Z = -10.0
 TARGET_YAW = 0.0
 POS_TOL = 2.0
 
@@ -170,7 +170,7 @@ def build_mappings_from_globals(env):
 
     Returns (id_to_agent, USV_IDS, AUV_ID, TICKS_PER_SEC)
     """
-    TICKS_PER_SEC = getattr(env, "ticks_per_sec", 100.0) if hasattr(env, "ticks_per_sec") else 100.0
+    TICKS_PER_SEC = getattr(env, "ticks_per_sec", 30.0) if hasattr(env, "ticks_per_sec") else 30.0
 
     id_to_agent = {
         AUV_BEACON_ID: AUV_NAME,
@@ -201,7 +201,7 @@ class AcousticRoundRobin:
         for (from_id, r, d) in responses: ekf.update_range(...)
     """
 
-    def __init__(self, auv_id, target_ids, ticks_per_sec, period_ticks=100, timeout_ticks=600):
+    def __init__(self, auv_id, target_ids, ticks_per_sec, period_ticks=30, timeout_ticks=90):
         self.auv_id = int(auv_id)
         self.target_ids = list(target_ids)
         self.ticks_per_sec = float(ticks_per_sec)
@@ -412,7 +412,7 @@ def apply_currents(env, state, clock):
     if clock == DRAW_CURRENT_FIELD_STEP:
         env.draw_debug_vector_field(
             vortex_field,
-            location=[0, 0, 0],
+            location=[20, 20, 0],
             vector_field_dimensions=MAP_DIMENSIONS,
             arrow_thickness=7,
             arrow_size=.25,
@@ -441,36 +441,21 @@ def run_ekf_acoustics(target_names=None, verbose=True):
     true_velocities = []
     est_velocities = []
     pos_covariances = []
-    full_covariances = []
-    nis_logs = {
-        "dvl": {"t": [], "values": [], "dof": 3},
-        "depth": {"t": [], "values": [], "dof": 1},
-        "acoustic": {"t": [], "values": [], "dof": 1},
-    }
     times = []
 
     use_dvl_update = True
     use_depth_update = True
     use_acoustic_updates = True  # enable acoustic fusion (multi-range ready)
 
-    with holoocean.make(SCENARIO_NAME, show_viewport=False, frames_per_sec=False, verbose=False) as env:
+    with holoocean.make(SCENARIO_NAME, show_viewport=True, frames_per_sec=False, verbose=False) as env:
 
         ticks_per_sec = getattr(env, "ticks_per_sec", DEFAULT_TICKS_PER_SEC)
         dt = 1.0 / float(ticks_per_sec)
 
-        def hz_to_period_ticks(hz, ticks_per_sec, name):
-            if hz <= 0:
-                return None
-            raw = ticks_per_sec / float(hz)
-            period = int(round(raw))
-            if abs(raw - period) > 1e-6:
-                print(f"[WARN] {name} rate {hz} is not a factor of ticks_per_sec {ticks_per_sec}. "
-                    f"Using period_ticks={period} (effective Hz={ticks_per_sec/period:.3f}).")
-            return max(1, period)
-
-        dvl_period_ticks   = hz_to_period_ticks(DVL_HZ, ticks_per_sec, "DVLSensor")
-        depth_period_ticks = hz_to_period_ticks(DEPTH_HZ, ticks_per_sec, "DepthSensor")
-
+        # Chi-square 95% thresholds for innovation gating (NIS).
+        # DOF = dimension of measurement z:
+        chi2_1d_95 = 3.841   # 1 DOF (depth, range)
+        chi2_3d_95 = 7.815   # 3 DOF (DVL vel)
 
         # Build maps and defaults from global configuration
         id_to_agent, USV_IDS, AUV_ID, _TICKS_PER_SEC = build_mappings_from_globals(env)
@@ -531,16 +516,10 @@ def run_ekf_acoustics(target_names=None, verbose=True):
                 timeout_ticks=int(3 * ticks_per_sec),        # 3s timeout
             )
 
-        # EKF uses IMU acceleration as an input. With the updated kalman_utils.EKF,
-        # q_vel_std is interpreted as accel uncertainty std (sigma_a, m/s^2)
-        # and q_pos_std is an optional position random-walk (m/sqrt(s)).
-        ekf = EKF(
-            dt=dt,
-            q_pos_std=Q_POS_STD,
-            q_vel_std=Q_VEL_STD,
-            p_pos_std_init=P_POS_STD_INIT,
-            p_vel_std_init=P_VEL_STD_INIT,
-        )
+        ekf = EKF(dt=dt)
+        # Use Allan-derived accel noise to set a physically meaningful process noise model.
+        # (If you prefer the older diagonal Q_POS_STD/Q_VEL_STD model, comment this out.)
+        ekf.set_process_noise_from_accel(ACC_SIGMA_SAMPLE)
 
         n_steps = int(SIM_DURATION_SEC * ticks_per_sec)
         prev_true_pos = None
@@ -550,16 +529,9 @@ def run_ekf_acoustics(target_names=None, verbose=True):
         yaw_cmd = TARGET_YAW
 
         for xy in WAYPOINTS_XY:
-            env.draw_point([xy[0], xy[1], TARGET_Z], color=[0, 255, 0], thickness=20.0, lifetime=0)
-
-
-        last_dvl = None
-        last_depth = None
-
+            env.draw_point([xy[0], xy[1], TARGET_Z], color=[0, 255, 0], thickness=15, lifetime=0)
 
         for k in range(n_steps):
-            #print (f"--- EKF step {k+1}/{n_steps} (sim_tick={sim_tick}) (duration={k/ticks_per_sec} ---")
-
             clock += 1
 
             x_wp, y_wp = WAYPOINTS_XY[idx]
@@ -568,7 +540,6 @@ def run_ekf_acoustics(target_names=None, verbose=True):
             # --- Step env (exactly once per EKF step) ---
             state = env.step(target_6d)
             sim_tick += 1
-            t_current = sim_tick * dt
 
             # Apply currents (optional)
             apply_currents(env, state, clock)
@@ -598,7 +569,6 @@ def run_ekf_acoustics(target_names=None, verbose=True):
             # --- IMU prediction ---
             a_world_raw = R_ws @ accel_body
             a_world = a_world_raw - GRAVITY_WORLD
-            #print (f'accel_body: {accel_body}, a_world_raw: {a_world_raw}, a_world: {a_world}')
 
             if k == 0:
                 ekf.x[0:3] = true_pos.copy()
@@ -607,61 +577,29 @@ def run_ekf_acoustics(target_names=None, verbose=True):
             ekf.predict(a_world)
 
             # --- DVL update (velocity) ---
-            if use_dvl_update and (dvl_period_ticks is None or (sim_tick % dvl_period_ticks) == 0):
-                prior_x = ekf.x.copy()
-                prior_P = ekf.P.copy()
+            if use_dvl_update:
                 v_body = dvl[0:3]
-                #v_world_meas = R_ws.T @ v_body
-                v_world_meas = v_body
+                v_world_meas = R_ws @ v_body
 
-                # Only update if this is actually a new measurement (not held/repeated)
-                if last_dvl is None or not np.allclose(v_world_meas, last_dvl, atol=1e-3):
-                    H_dvl = np.array([
-                        [0, 0, 0, 1, 0, 0],
-                        [0, 0, 0, 0, 1, 0],
-                        [0, 0, 0, 0, 0, 1],
-                    ])
-                    R_dvl = np.diag([DVL_VEL_STD**2]*3)
-
-                    y_dvl = v_world_meas.reshape(3, 1) - H_dvl @ prior_x.reshape(6, 1)
-                    S_dvl = H_dvl @ prior_P @ H_dvl.T + R_dvl
-                    try:
-                        nis_val = float(y_dvl.T @ np.linalg.solve(S_dvl, y_dvl))
-                    except np.linalg.LinAlgError:
-                        nis_val = float(y_dvl.T @ np.linalg.pinv(S_dvl) @ y_dvl)
-                    nis_logs["dvl"]["t"].append(t_current)
-                    nis_logs["dvl"]["values"].append(nis_val)
-
-                    ekf.update_linear(v_world_meas, H_dvl, R_dvl)
-                    last_dvl = v_world_meas.copy()
-
-
+                H_dvl = np.array([
+                    [0, 0, 0, 1, 0, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 0, 1],
+                ])
+                R_dvl = np.diag([
+                    DVL_VEL_STD**2,
+                    DVL_VEL_STD**2,
+                    DVL_VEL_STD**2,
+                ])
+                ekf.update_linear(v_world_meas, H_dvl, R_dvl, chi2_gate=chi2_3d_95)
 
             # --- Depth update (z) ---
-            if use_depth_update and (depth_period_ticks is None or (sim_tick % depth_period_ticks) == 0):
-                prior_x = ekf.x.copy()
-                prior_P = ekf.P.copy()
+            if use_depth_update:
                 z_meas = float(depth[0])
-
-                # Only update if new (depth often holds last value between true updates)
-                if last_depth is None or abs(z_meas - last_depth) > 1e-3:
-                    z_vec = np.array([z_meas])
-                    H_depth = np.array([[0, 0, 1, 0, 0, 0]])
-                    R_depth = np.array([[DEPTH_STD**2]])
-
-                    y_depth = z_vec.reshape(1, 1) - H_depth @ prior_x.reshape(6, 1)
-                    S_depth = H_depth @ prior_P @ H_depth.T + R_depth
-                    try:
-                        nis_val = float(y_depth.T @ np.linalg.solve(S_depth, y_depth))
-                    except np.linalg.LinAlgError:
-                        nis_val = float(y_depth.T @ np.linalg.pinv(S_depth) @ y_depth)
-                    nis_logs["depth"]["t"].append(t_current)
-                    nis_logs["depth"]["values"].append(nis_val)
-
-                    ekf.update_linear(z_vec, H_depth, R_depth)
-                    last_depth = z_meas
-
-
+                z_vec = np.array([z_meas])
+                H_depth = np.array([[0, 0, 1, 0, 0, 0]])
+                R_depth = np.array([[DEPTH_STD**2]])
+                ekf.update_linear(z_vec, H_depth, R_depth, chi2_gate=chi2_1d_95)
 
             # --- Acoustic scheduling + polling (non-blocking) ---
             if use_acoustic_updates and acoustic_mgr is not None:
@@ -688,30 +626,7 @@ def run_ekf_acoustics(target_names=None, verbose=True):
                     if beacon_pos is None:
                         continue
 
-                    prior_x = ekf.x.copy()
-                    prior_P = ekf.P.copy()
-                    px, py, pz = prior_x[0:3]
-                    bx, by, bz = beacon_pos
-                    dx = px - bx
-                    dy = py - by
-                    dz = pz - bz
-                    dist_pred = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-9
-
-                    H_range = np.zeros((1, 6))
-                    H_range[0, 0] = dx / dist_pred
-                    H_range[0, 1] = dy / dist_pred
-                    H_range[0, 2] = dz / dist_pred
-                    R_range = np.array([[ACOUSTIC_RANGE_STD**2]])
-                    y_range = np.array([[dist_m - dist_pred]])
-                    S_range = H_range @ prior_P @ H_range.T + R_range
-                    try:
-                        nis_val = float(y_range.T @ np.linalg.solve(S_range, y_range))
-                    except np.linalg.LinAlgError:
-                        nis_val = float(y_range.T @ np.linalg.pinv(S_range) @ y_range)
-                    nis_logs["acoustic"]["t"].append(t_current)
-                    nis_logs["acoustic"]["values"].append(nis_val)
-
-                    ekf.update_range(dist_m, beacon_pos, ACOUSTIC_RANGE_STD**2)
+                    ekf.update_range(dist_m, beacon_pos, ACOUSTIC_RANGE_STD**2, chi2_gate=chi2_1d_95)
 
             # --- Heading control: face currents or waypoint ---
             current_vec = vortex_field(loc)
@@ -723,13 +638,13 @@ def run_ekf_acoustics(target_names=None, verbose=True):
                     yaw_cmd = np.arctan2(to_wp[1], to_wp[0])
 
             # --- Logging ---
-            times.append(t_current)
+            t = sim_tick * dt
+            times.append(t)
             true_positions.append(true_pos.copy())
             est_positions.append(ekf.x[0:3].copy())
             true_velocities.append(true_vel.copy())
             est_velocities.append(ekf.x[3:6].copy())
             pos_covariances.append(ekf.P[0:3, 0:3].copy())
-            full_covariances.append(ekf.P.copy())
 
             # --- Waypoint switching ---
             dist_to_wp = np.linalg.norm(loc[0:2] - np.array([x_wp, y_wp]))
@@ -747,16 +662,116 @@ def run_ekf_acoustics(target_names=None, verbose=True):
     est_velocities = np.array(est_velocities)
     pos_covariances = np.array(pos_covariances)
 
-    return (
-        times,
-        true_positions,
-        est_positions,
-        true_velocities,
-        est_velocities,
-        pos_covariances,
-        full_covariances,
-        nis_logs,
-    )
+    return times, true_positions, est_positions, true_velocities, est_velocities, pos_covariances
+
+
+'''def main(loop=True, num_usvs=4, target_ids=None, target_names=None, verbose=False):
+
+    # Create the environment once, then use functions to operate on it
+    with holoocean.make(SCENARIO_NAME, show_viewport=False, frames_per_sec=False) as env:
+
+        # Minimal startup diagnostics (verbose)
+        if verbose:
+            print(f"Scenario: {SCENARIO_NAME}")
+            print("Beacons:", get_beacon_ids(env))
+            statuses = get_beacon_statuses(env)
+            if statuses:
+                print("Statuses:", statuses)
+
+        # Build maps and defaults from global configuration
+        id_to_agent, USV_IDS, AUV_ID, TICKS_PER_SEC = build_mappings_from_globals(env)
+
+        if not USV_IDS:
+            print("[ERROR] No USV_IDS detected. Aborting.")
+            return
+        if AUV_ID is None:
+            print("[ERROR] No AUV_ID detected. Aborting.")
+            return
+
+        if verbose:
+            print("Using beacon ID", AUV_ID, "as AUV sender (agent=", id_to_agent.get(AUV_ID, 'unknown'), ")")
+
+        # Choose targets: explicit target_ids take precedence; else use first N USVs
+        actual = get_beacon_ids(env)
+        # Build name->id for USVs only
+        name_to_id = {name: bid for bid, name in id_to_agent.items() if bid in [
+            USV_BEACON_ID_1, USV_BEACON_ID_2, USV_BEACON_ID_3, USV_BEACON_ID_4
+        ]}
+
+        requested_ids = []
+        # Names first (preserve provided order)
+        if target_names:
+            for n in target_names:
+                if n in name_to_id:
+                    requested_ids.append(name_to_id[n])
+                else:
+                    print(f"[INFO] Unknown target name '{n}' — skipping")
+        # Then explicit IDs
+        if target_ids:
+            requested_ids.extend(target_ids)
+
+        if requested_ids:
+            # Deduplicate preserving order
+            requested_ids = list(dict.fromkeys(requested_ids))
+            selected_usv_ids = [bid for bid in requested_ids if (not actual or bid in actual)]
+            removed = [bid for bid in requested_ids if bid not in selected_usv_ids]
+            if removed:
+                print(f"[INFO] Skipping non-existent beacons {removed}; using {selected_usv_ids}")
+        else:
+            selected_usv_ids = sorted(USV_IDS)[:max(1, min(int(num_usvs), 4))]
+            if actual:
+                before = list(selected_usv_ids)
+                selected_usv_ids = [bid for bid in selected_usv_ids if bid in actual]
+                removed = [bid for bid in before if bid not in selected_usv_ids]
+                if removed:
+                    print(f"[INFO] Skipping non-existent beacons {removed}; using {selected_usv_ids}")
+        print(f"Targeting {len(selected_usv_ids)} USV beacons: {selected_usv_ids}")
+
+        try:
+            # Run at least once; if loop=True, run repeatedly until Ctrl-C
+
+            clock = 0
+            while True:
+                # Step once to get current AUV location and apply currents
+                last_state = [{}]
+                state = safe_tick(env, last_state)
+                clock += 1
+                apply_currents(env, state, clock)
+
+                # Now run the round-robin ranging (it will advance the sim internally)
+                ranges = run_round_robin(env, id_to_agent, selected_usv_ids, AUV_ID, TICKS_PER_SEC, verbose=verbose)
+
+                # Print collected ranges for inspection
+                if ranges:
+                    # Build and print a dynamic list aligned to the selected USV beacons order
+                    ranges_list = [ranges.get(bid) for bid in selected_usv_ids]
+                    print(f"\n[RESULT] Ranges list ({len(ranges_list)} beacons, order={selected_usv_ids}):")
+                    print(ranges_list)
+
+                if not loop:
+                    break
+
+                # small pause to avoid tight loop; user can Ctrl-C to quit
+                time.sleep(0.5)
+
+        except KeyboardInterrupt:
+            print("\nInterrupted by user (Ctrl-C). Exiting.")'''
+
+
+'''if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Collect acoustic ranges from USV beacons in HoloOcean")
+    parser.add_argument("--loop", action="store_true", help="Run round-robin continuously until Ctrl-C")
+    parser.add_argument("--num-usvs", type=int, choices=[1, 2, 3, 4], default=4,
+                        help="Number of USVs to range (1..4)")
+    parser.add_argument("--target-id", type=int, action="append",
+                        help="Beacon ID to range from; repeat to specify multiple (overrides --num-usvs)")
+    parser.add_argument("--target-name", type=str, action="append",
+                        help="Target agent name (e.g., usv1); repeat to specify multiple")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    args = parser.parse_args()
+    main(loop=args.loop, num_usvs=args.num_usvs, target_ids=args.target_id, target_names=args.target_name, verbose=args.verbose)
+
+'''
 
 
 def main(target_names=None, verbose=False):
@@ -766,9 +781,8 @@ def main(target_names=None, verbose=False):
      est_pos,
      true_vel,
      est_vel,
-        Ppos,
-        Pfull,
-        nis_logs) = run_ekf_acoustics(target_names=target_names, verbose=verbose)
+
+    Ppos) = run_ekf_acoustics(target_names=target_names, verbose=verbose)
 
     pos_rmse, pos_axis = compute_rmse(true_pos, est_pos)
     vel_rmse, vel_axis = compute_rmse(true_vel, est_vel)
@@ -781,35 +795,6 @@ def main(target_names=None, verbose=False):
     print(f"    axes (x,y,z)       : {vel_axis}")
     print(f"  Final position error : {final_err:.3f} m")
     print("=======================================\n")
-
-    # === Consistency metrics ===
-    state_err = np.hstack((est_pos - true_pos, est_vel - true_vel))
-    nees_full = calculate_nees(state_err, Pfull)
-    nees_pos = calculate_nees(state_err, Pfull, indices=[0, 1, 2])
-    nees_full_test = nees_consistency_test(nees_full, dof=6)
-    nees_pos_test = nees_consistency_test(nees_pos, dof=3)
-
-    print("NEES (full state 6D): avg={avg:.3f}, expected=6, ci=[{lo:.3f},{hi:.3f}], inside={pct:.1f}%".format(
-        avg=nees_full_test["avg_nees"], lo=nees_full_test["lower_bound"], hi=nees_full_test["upper_bound"],
-        pct=nees_full_test["percent_inside_bounds"]))
-    print("NEES (position 3D):  avg={avg:.3f}, expected=3, ci=[{lo:.3f},{hi:.3f}], inside={pct:.1f}%".format(
-        avg=nees_pos_test["avg_nees"], lo=nees_pos_test["lower_bound"], hi=nees_pos_test["upper_bound"],
-        pct=nees_pos_test["percent_inside_bounds"]))
-
-    nis_results = {}
-    for key in ("dvl", "depth", "acoustic"):
-        vals = np.array(nis_logs[key]["values"])
-        if vals.size == 0:
-            nis_results[key] = None
-            continue
-        nis_results[key] = nis_consistency_test(vals, dof=nis_logs[key]["dof"])
-
-    for key in ("dvl", "depth", "acoustic"):
-        res = nis_results.get(key)
-        if res is None:
-            print(f"NIS ({key}): no samples")
-        else:
-            print(f"NIS ({key}): avg={res['avg_nis']:.3f}, expected={res['expected_nis']}, ci=[{res['lower_bound']:.3f},{res['upper_bound']:.3f}], inside={res['percent_inside_bounds']:.1f}%")
 
     # ===== Plots (similar style to EKF.py) =====
     chi2_1d_95 = 3.841
@@ -851,56 +836,6 @@ def main(target_names=None, verbose=False):
     plt.title("Position error over time")
     plt.legend()
 
-    # NEES time series with per-sample bounds
-    nees_lower_full, nees_upper_full = nees_full_test["per_sample_bounds"]
-    plt.figure()
-    plt.plot(times, nees_full, label="NEES (6D)", color="purple")
-    plt.axhline(nees_lower_full, color="gray", linestyle="--", label="95% lower")
-    plt.axhline(nees_upper_full, color="gray", linestyle="--", label="95% upper")
-    plt.xlabel("time [s]")
-    plt.ylabel("NEES")
-    plt.title("NEES consistency (full state)")
-    plt.legend()
-
-    nees_lower_pos, nees_upper_pos = nees_pos_test["per_sample_bounds"]
-    plt.figure()
-    plt.plot(times, nees_pos, label="NEES (pos)", color="teal")
-    plt.axhline(nees_lower_pos, color="gray", linestyle="--", label="95% lower")
-    plt.axhline(nees_upper_pos, color="gray", linestyle="--", label="95% upper")
-    plt.xlabel("time [s]")
-    plt.ylabel("NEES")
-    plt.title("NEES consistency (position only)")
-    plt.legend()
-
-    # NIS per sensor
-    for key, color, label in [("dvl", "red", "DVL"), ("depth", "blue", "Depth"), ("acoustic", "green", "Acoustic")]:
-        vals = np.array(nis_logs[key]["values"])
-        tvals = np.array(nis_logs[key]["t"])
-        if vals.size == 0:
-            continue
-        res = nis_results[key]
-        lower, upper = res["per_sample_bounds"]
-        plt.figure()
-        plt.plot(tvals, vals, label=f"NIS {label}", color=color)
-        plt.axhline(lower, color="gray", linestyle="--", label="95% lower")
-        plt.axhline(upper, color="gray", linestyle="--", label="95% upper")
-        plt.xlabel("time [s]")
-        plt.ylabel("NIS")
-        plt.title(f"NIS consistency ({label})")
-        plt.legend()
-
-    # Per-axis positional uncertainty over time (1D 95%)
-    diag_cov = np.diagonal(Ppos, axis1=1, axis2=2)
-    half_widths_t = np.sqrt(diag_cov * chi2_1d_95)
-    plt.figure()
-    plt.plot(times, half_widths_t[:, 0], label="x 95% half-width", color="red")
-    plt.plot(times, half_widths_t[:, 1], label="y 95% half-width", color="green")
-    plt.plot(times, half_widths_t[:, 2], label="z 95% half-width", color="blue")
-    plt.xlabel("time [s]")
-    plt.ylabel("pos half-width [m]")
-    plt.title("Position uncertainty over time (95% per-axis)")
-    plt.legend()
-
     # 3D uncertainty bubble at final step
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
@@ -918,15 +853,6 @@ def main(target_names=None, verbose=False):
     ax.set_ylabel("y [m]")
     ax.set_zlabel("z [m]")
     ax.legend()
-
-    # Final-axis positional uncertainty (1D 95%)
-    centers, half_widths, labels = axis_uncertainty_bounds(P_final, mean, chi2_val=chi2_1d_95)
-    plt.figure()
-    plt.errorbar(labels, centers, yerr=half_widths, fmt="o", color="purple", ecolor="purple", capsize=6, linewidth=2)
-    plt.plot(labels, true_pos[idx, :3], "x", color="k", label="true pos")
-    plt.ylabel("position [m]")
-    plt.title("Final position uncertainty (95% per-axis)")
-    plt.legend()
 
     plt.show()
 

@@ -167,7 +167,7 @@ def run_ekf_with_control(use_dvl_update: bool,
 
 
 
-    with holoocean.make(SCENARIO_NAME, show_viewport = False, frames_per_sec= False) as env:
+    with holoocean.make(SCENARIO_NAME, show_viewport = True, frames_per_sec= False) as env:
         ticks_per_sec = getattr(env, "ticks_per_sec", DEFAULT_TICKS_PER_SEC)
         dt = 1.0 / float(ticks_per_sec)
 

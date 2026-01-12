@@ -244,7 +244,7 @@ def apply_currents(env, state, clock):
 def main(loop=True, num_usvs=4, target_ids=None, target_names=None, verbose=False):
 
     # Create the environment once, then use functions to operate on it
-    with holoocean.make(SCENARIO_NAME, show_viewport=False, frames_per_sec=False) as env:
+    with holoocean.make(SCENARIO_NAME, show_viewport=True, frames_per_sec=False) as env:
 
         # Minimal startup diagnostics (verbose)
         if verbose:
