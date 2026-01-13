@@ -120,37 +120,3 @@ def nis_consistency_test(nis_values, dof, alpha=0.05):
         "per_sample_bounds": (per_sample_lower, per_sample_upper),
         "num_samples": count,
     }
-
-
-def downsampled_mean_nees_test(nees_values, dof, stride=10, alpha=0.05):
-    """Chi-square test on a downsampled NEES sequence to reduce correlation effects.
-
-    Parameters
-    ----------
-    nees_values : array_like
-        Full NEES time series.
-    dof : int
-        Degrees of freedom for the state subspace.
-    stride : int
-        Keep every stride-th sample (>=1). Larger stride -> fewer, less correlated samples.
-    alpha : float
-        Two-sided significance level for the chi-square interval on the *mean* NEES.
-    """
-    vals = np.asarray(nees_values)
-    if stride is None or stride < 1:
-        stride = 1
-    ds = vals[::stride]
-    valid = np.isfinite(ds)
-    count = int(np.sum(valid))
-    avg = float(np.nanmean(ds)) if count > 0 else np.nan
-    lower, upper = chi2_bounds(dof, alpha=alpha, samples=max(count, 1))
-    is_consistent = bool(lower <= avg <= upper) if np.isfinite(avg) else False
-    return {
-        "is_consistent": is_consistent,
-        "avg_nees": avg,
-        "lower_bound": lower,
-        "upper_bound": upper,
-        "samples": count,
-        "stride": stride,
-        "alpha": alpha,
-    }

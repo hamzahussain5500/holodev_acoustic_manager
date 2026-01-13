@@ -3,9 +3,7 @@ import numpy as np
 import time
 import argparse
 import matplotlib.pyplot as plt
-from typing import Any, Dict, Optional
 from kalman_utils import EKF, compute_rmse
-from trajectory import build_trajectory, lawnmower_waypoints, spiral_waypoints, concentric_circles_waypoints, figure_eight_waypoints
 from uncertainty_utils import (
     covariance_ellipse_points,
     covariance_ellipsoid_mesh,
@@ -46,12 +44,12 @@ USV_BEACON_ID_4      = 4
 
 # Simulation timing
 DEFAULT_TICKS_PER_SEC = 100
-SIM_DURATION_SEC = 900.0
+SIM_DURATION_SEC = 600.0
 
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
 
-# EKF process noise (Q
+# EKF process noise (Q)
 Q_POS_STD = 0.0
 Q_VEL_STD = 0.085
 
@@ -72,7 +70,7 @@ ACOUSTIC_RANGE_STD = 0.1
 ACOUSTIC_UPDATE_PERIOD_TICKS = 100  # ~1 second if ticks_per_sec=100
 
 # ===== Currents control =====
-USE_CURRENTS = False
+USE_CURRENTS = True
 VEHICLES_FOR_CURRENTS = [AUV_NAME]
 MAP_DIMENSIONS = [100, 100, 25]
 DRAW_CURRENT_FIELD_STEP = 100
@@ -81,32 +79,32 @@ DRAW_CURRENT_FIELD_STEP = 100
 # The vehicle tracks XY waypoints at a fixed depth. Yaw is steered to face the
 # incoming current (upstream) when a measurable current exists; otherwise it
 # faces the active waypoint.
-TARGET_Z = -90.0
+TARGET_Z = -15.0
 TARGET_YAW = 0.0
-POS_TOL = 1.0
+POS_TOL = 2.0
 
 
-def path_length(points: np.ndarray) -> float:
-    """Return cumulative Euclidean distance along a polyline of points."""
-    if points is None or len(points) < 2:
-        return 0.0
-    diffs = np.diff(np.asarray(points), axis=0)
-    return float(np.sum(np.linalg.norm(diffs, axis=1)))
+def lawnmower_waypoints(start_xy=(-35.0, -35.0),
+                        xmin=-35.0, xmax=35.0,
+                        ymin=-35.0, ymax=35.0,
+                        spacing=12.5):
+    start_xy = np.array(start_xy, dtype=float)
+    ys = np.arange(ymin, ymax + 1e-9, spacing)
 
+    wps = [start_xy, np.array([xmin, ys[0]])]  # start + entry
 
-def _reset_acoustic_sensor_state():
-    """Clear class-level state that can persist across HoloOcean env instances."""
-    try:
-        from holoocean.sensors import AcousticBeaconSensor
+    # build alternating sweeps with vertical step between lanes
+    x_end = xmin
+    for i, y in enumerate(ys):
+        x_target = xmax if (i % 2 == 0) else xmin
+        wps.append(np.array([x_target, y]))
+        x_end = x_target
+        if i < len(ys) - 1:
+            wps.append(np.array([x_end, ys[i+1]]))  # step up at the end
 
-        if hasattr(AcousticBeaconSensor, "instances"):
-            AcousticBeaconSensor.instances = {}
-        if hasattr(AcousticBeaconSensor, "pending_responses"):
-            AcousticBeaconSensor.pending_responses = {}
-        if hasattr(AcousticBeaconSensor, "sending_to"):
-            AcousticBeaconSensor.sending_to = {}
-    except Exception:
-        pass
+    return np.vstack(wps)
+
+WAYPOINTS_XY = lawnmower_waypoints(spacing=12.5)
 
 def safe_tick(env, last_state_container, retries=5, delay=0.01, show_warn=True):
     """Call env.tick() with retries on intermittent ValueError.
@@ -406,9 +404,9 @@ def vortex_field(location):
     return np.array([3*dx, 3*dy, 3*dz], dtype=float)
 
 
-def apply_currents(env, state, clock, enabled=True):
+def apply_currents(env, state, clock):
     """Apply currents to vehicles if USE_CURRENTS is True (AUV only)."""
-    if not enabled:
+    if not USE_CURRENTS:
         return
 
     if clock == DRAW_CURRENT_FIELD_STEP:
@@ -430,13 +428,7 @@ def apply_currents(env, state, clock, enabled=True):
 
 
 
-def run_ekf_acoustics(
-    target_names=None,
-    verbose=False,
-    sim_config: Optional[Dict[str, Any]] = None,
-    rng: Optional[np.random.Generator] = None,
-    debug_steps: bool = False,
-):
+def run_ekf_acoustics(target_names=None, verbose=True):
     """Run one EKF fusion with IMU + DVL + Depth + Acoustic ranges (multi-target ready).
 
     Key properties of this implementation:
@@ -444,48 +436,6 @@ def run_ekf_acoustics(
       - Acoustic ranging handled asynchronously via AcousticRoundRobin state machine.
       - Supports fusing multiple ranges (sequential updates) as they arrive.
     """
-    cfg = {
-        "use_currents": False,
-        "use_dvl_update": True,
-        "use_depth_update": True,
-        "use_acoustic_updates": True,
-        "acoustic_period_ticks": ACOUSTIC_UPDATE_PERIOD_TICKS,
-        "dvl_measurement_std": DVL_VEL_STD,
-        "depth_measurement_std": DEPTH_STD,
-        "acoustic_measurement_std": ACOUSTIC_RANGE_STD,
-        "dvl_extra_std": 0.0,
-        "depth_extra_std": 0.0,
-        "range_extra_std": 0.0,
-        "imu_accel_extra_std": 0.0,
-        "imu_bias_rw_std": 0.0,
-        "q_pos_std": Q_POS_STD,
-        "q_vel_std": Q_VEL_STD,
-        "p_pos_std_init": P_POS_STD_INIT,
-        "p_vel_std_init": P_VEL_STD_INIT,
-        "trajectory": "lawnmower",
-        "waypoint_spacing": 12.5,
-        # Spiral tuning (start at spawn: 200, -200, -5; grow to 50 m radius; descend to -90 m)
-        "spiral_center": (200.0, -200.0),
-        "spiral_min_radius": 10.0,
-        "spiral_max_radius": 50.0,
-        "spiral_turns": 5,
-        "spiral_points_per_rev": 250,
-        "spiral_z_start": -5.0,
-        "spiral_z_end": TARGET_Z,
-        # Concentric circles tuning
-        "concentric_radii": (10.0, 20.0, 30.0),
-        "concentric_points_per_circle": 400,
-        # Figure-eight tuning
-        "figure8_scale": 20.0,
-        "figure8_turns": 3,
-        "figure8_points_per_turn": 300,
-    }
-    if sim_config:
-        cfg.update(sim_config)
-
-    local_rng = rng
-    bias_state = np.zeros(3)
-
     true_positions = []
     est_positions = []
     true_velocities = []
@@ -499,12 +449,9 @@ def run_ekf_acoustics(
     }
     times = []
 
-    use_dvl_update = bool(cfg.get("use_dvl_update", True))
-    use_depth_update = bool(cfg.get("use_depth_update", True))
-    use_acoustic_updates = bool(cfg.get("use_acoustic_updates", True))
-
-    # Clear any lingering static sensor state before creating a new env instance
-    _reset_acoustic_sensor_state()
+    use_dvl_update = True
+    use_depth_update = True
+    use_acoustic_updates = True  # enable acoustic fusion (multi-range ready)
 
     with holoocean.make(SCENARIO_NAME, show_viewport=False, frames_per_sec=False, verbose=False) as env:
 
@@ -580,7 +527,7 @@ def run_ekf_acoustics(
                 auv_id=AUV_ID,
                 target_ids=selected_usv_ids,
                 ticks_per_sec=ticks_per_sec,
-                period_ticks=int(cfg.get("acoustic_period_ticks", ACOUSTIC_UPDATE_PERIOD_TICKS)),   # total ping rate, not per-target
+                period_ticks=ACOUSTIC_UPDATE_PERIOD_TICKS,   # total ping rate, not per-target
                 timeout_ticks=int(3 * ticks_per_sec),        # 3s timeout
             )
 
@@ -589,10 +536,10 @@ def run_ekf_acoustics(
         # and q_pos_std is an optional position random-walk (m/sqrt(s)).
         ekf = EKF(
             dt=dt,
-            q_pos_std=cfg.get("q_pos_std", Q_POS_STD),
-            q_vel_std=cfg.get("q_vel_std", Q_VEL_STD),
-            p_pos_std_init=cfg.get("p_pos_std_init", P_POS_STD_INIT),
-            p_vel_std_init=cfg.get("p_vel_std_init", P_VEL_STD_INIT),
+            q_pos_std=Q_POS_STD,
+            q_vel_std=Q_VEL_STD,
+            p_pos_std_init=P_POS_STD_INIT,
+            p_vel_std_init=P_VEL_STD_INIT,
         )
 
         n_steps = int(SIM_DURATION_SEC * ticks_per_sec)
@@ -602,15 +549,8 @@ def run_ekf_acoustics(
         idx = 0
         yaw_cmd = TARGET_YAW
 
-        # Build waypoints from selected trajectory
-        waypoint_spacing = cfg.get("waypoint_spacing", 12.5)
-        trajectory_name = cfg.get("trajectory", "lawnmower")
-        waypoints = np.asarray(build_trajectory(trajectory_name, cfg), dtype=float)
-        has_z_in_waypoints = waypoints.shape[1] >= 3
-
-        for wp in waypoints:
-            z_draw = wp[2] if has_z_in_waypoints else TARGET_Z
-            env.draw_point([wp[0], wp[1], z_draw], color=[0, 255, 0], thickness=20.0, lifetime=0)
+        for xy in WAYPOINTS_XY:
+            env.draw_point([xy[0], xy[1], TARGET_Z], color=[0, 255, 0], thickness=20.0, lifetime=0)
 
 
         last_dvl = None
@@ -618,15 +558,12 @@ def run_ekf_acoustics(
 
 
         for k in range(n_steps):
-            if debug_steps:
-                print(f"--- EKF step {k+1}/{n_steps} (sim_tick={sim_tick}) (duration={k/ticks_per_sec}) ---")
+            #print (f"--- EKF step {k+1}/{n_steps} (sim_tick={sim_tick}) (duration={k/ticks_per_sec} ---")
 
             clock += 1
 
-            x_wp = waypoints[idx, 0]
-            y_wp = waypoints[idx, 1]
-            z_wp = waypoints[idx, 2] if has_z_in_waypoints else TARGET_Z
-            target_6d = np.array([x_wp, y_wp, z_wp, 0.0, 0.0, yaw_cmd], dtype=float)
+            x_wp, y_wp = WAYPOINTS_XY[idx]
+            target_6d = np.array([x_wp, y_wp, TARGET_Z, 0.0, 0.0, yaw_cmd], dtype=float)
 
             # --- Step env (exactly once per EKF step) ---
             state = env.step(target_6d)
@@ -634,7 +571,7 @@ def run_ekf_acoustics(
             t_current = sim_tick * dt
 
             # Apply currents (optional)
-            apply_currents(env, state, clock, enabled=cfg.get("use_currents", USE_CURRENTS))
+            apply_currents(env, state, clock)
 
             # --- Read sensors ---
             imu   = state[AUV_NAME]["IMUSensor"]
@@ -646,13 +583,6 @@ def run_ekf_acoustics(
             accel_meas = imu[0, :]
             accel_bias = imu[2, :] if imu.shape[0] >= 3 else np.zeros(3)
             accel_body = accel_meas - accel_bias
-
-            if local_rng is not None and cfg.get("imu_accel_extra_std", 0.0) > 0.0:
-                accel_body = accel_body + local_rng.normal(0.0, cfg["imu_accel_extra_std"], size=3)
-
-            if local_rng is not None and cfg.get("imu_bias_rw_std", 0.0) > 0.0:
-                bias_state += local_rng.normal(0.0, cfg["imu_bias_rw_std"] * np.sqrt(dt), size=3)
-                accel_body = accel_body + bias_state
 
             T_ws = pose
             R_ws = T_ws[0:3, 0:3]
@@ -668,8 +598,7 @@ def run_ekf_acoustics(
             # --- IMU prediction ---
             a_world_raw = R_ws @ accel_body
             a_world = a_world_raw - GRAVITY_WORLD
-            if debug_steps:
-                print(f"accel_body: {accel_body}, a_world_raw: {a_world_raw}, a_world: {a_world}")
+            #print (f'accel_body: {accel_body}, a_world_raw: {a_world_raw}, a_world: {a_world}')
 
             if k == 0:
                 ekf.x[0:3] = true_pos.copy()
@@ -682,11 +611,8 @@ def run_ekf_acoustics(
                 prior_x = ekf.x.copy()
                 prior_P = ekf.P.copy()
                 v_body = dvl[0:3]
-                # DVL reports body-frame velocity; transform to world-frame
-                v_world_meas = R_ws @ v_body
-
-                if local_rng is not None and cfg.get("dvl_extra_std", 0.0) > 0.0:
-                    v_world_meas = v_world_meas + local_rng.normal(0.0, cfg["dvl_extra_std"], size=3)
+                #v_world_meas = R_ws.T @ v_body
+                v_world_meas = v_body
 
                 # Only update if this is actually a new measurement (not held/repeated)
                 if last_dvl is None or not np.allclose(v_world_meas, last_dvl, atol=1e-3):
@@ -695,7 +621,7 @@ def run_ekf_acoustics(
                         [0, 0, 0, 0, 1, 0],
                         [0, 0, 0, 0, 0, 1],
                     ])
-                    R_dvl = np.diag([cfg.get("dvl_measurement_std", DVL_VEL_STD)**2]*3)
+                    R_dvl = np.diag([DVL_VEL_STD**2]*3)
 
                     y_dvl = v_world_meas.reshape(3, 1) - H_dvl @ prior_x.reshape(6, 1)
                     S_dvl = H_dvl @ prior_P @ H_dvl.T + R_dvl
@@ -716,14 +642,12 @@ def run_ekf_acoustics(
                 prior_x = ekf.x.copy()
                 prior_P = ekf.P.copy()
                 z_meas = float(depth[0])
-                if local_rng is not None and cfg.get("depth_extra_std", 0.0) > 0.0:
-                    z_meas = z_meas + float(local_rng.normal(0.0, cfg["depth_extra_std"]))
 
                 # Only update if new (depth often holds last value between true updates)
                 if last_depth is None or abs(z_meas - last_depth) > 1e-3:
                     z_vec = np.array([z_meas])
                     H_depth = np.array([[0, 0, 1, 0, 0, 0]])
-                    R_depth = np.array([[cfg.get("depth_measurement_std", DEPTH_STD)**2]])
+                    R_depth = np.array([[DEPTH_STD**2]])
 
                     y_depth = z_vec.reshape(1, 1) - H_depth @ prior_x.reshape(6, 1)
                     S_depth = H_depth @ prior_P @ H_depth.T + R_depth
@@ -772,16 +696,13 @@ def run_ekf_acoustics(
                     dy = py - by
                     dz = pz - bz
                     dist_pred = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-9
-                    dist_m_noisy = dist_m
-                    if local_rng is not None and cfg.get("range_extra_std", 0.0) > 0.0:
-                        dist_m_noisy = dist_m_noisy + float(local_rng.normal(0.0, cfg["range_extra_std"]))
 
                     H_range = np.zeros((1, 6))
                     H_range[0, 0] = dx / dist_pred
                     H_range[0, 1] = dy / dist_pred
                     H_range[0, 2] = dz / dist_pred
-                    R_range = np.array([[cfg.get("acoustic_measurement_std", ACOUSTIC_RANGE_STD)**2]])
-                    y_range = np.array([[dist_m_noisy - dist_pred]])
+                    R_range = np.array([[ACOUSTIC_RANGE_STD**2]])
+                    y_range = np.array([[dist_m - dist_pred]])
                     S_range = H_range @ prior_P @ H_range.T + R_range
                     try:
                         nis_val = float(y_range.T @ np.linalg.solve(S_range, y_range))
@@ -790,7 +711,7 @@ def run_ekf_acoustics(
                     nis_logs["acoustic"]["t"].append(t_current)
                     nis_logs["acoustic"]["values"].append(nis_val)
 
-                    ekf.update_range(dist_m_noisy, beacon_pos, cfg.get("acoustic_measurement_std", ACOUSTIC_RANGE_STD)**2)
+                    ekf.update_range(dist_m, beacon_pos, ACOUSTIC_RANGE_STD**2)
 
             # --- Heading control: face currents or waypoint ---
             current_vec = vortex_field(loc)
@@ -812,11 +733,10 @@ def run_ekf_acoustics(
 
             # --- Waypoint switching ---
             dist_to_wp = np.linalg.norm(loc[0:2] - np.array([x_wp, y_wp]))
-            depth_err = abs(loc[2] - z_wp)
+            depth_err = abs(loc[2] - TARGET_Z)
             if dist_to_wp <= POS_TOL and depth_err <= POS_TOL:
-                if idx >= len(waypoints) - 1:
-                    if verbose:
-                        print("Final waypoint reached. Ending simulation.")
+                if idx >= len(WAYPOINTS_XY) - 1:
+                    print("Final waypoint reached. Ending simulation.")
                     break
                 idx += 1
 
@@ -839,137 +759,7 @@ def run_ekf_acoustics(
     )
 
 
-def run_single_trial(
-    seed: int,
-    config_overrides: Optional[Dict[str, Any]] = None,
-    return_timeseries: bool = False,
-    target_names=None,
-):
-    """Run one EKF simulation with reproducible seed and collect metrics."""
-
-    np.random.seed(seed)
-    rng = np.random.default_rng(seed)
-
-    base_config: Dict[str, Any] = {
-        "use_currents": False,
-        "use_dvl_update": True,
-        "use_depth_update": True,
-        "use_acoustic_updates": True,
-        "acoustic_period_ticks": ACOUSTIC_UPDATE_PERIOD_TICKS,
-        "dvl_measurement_std": DVL_VEL_STD,
-        "depth_measurement_std": DEPTH_STD,
-        "acoustic_measurement_std": ACOUSTIC_RANGE_STD,
-        "dvl_extra_std": 0.0,
-        "depth_extra_std": 0.0,
-        "range_extra_std": 0.0,
-        "imu_accel_extra_std": 0.0,
-        "imu_bias_rw_std": 0.0,
-        "q_pos_std": Q_POS_STD,
-        "q_vel_std": Q_VEL_STD,
-        "p_pos_std_init": P_POS_STD_INIT,
-        "p_vel_std_init": P_VEL_STD_INIT,
-        "waypoint_spacing": 12.5,
-        "trajectory": "lawnmower",
-        "spiral_center": (200.0, -200.0),
-        "spiral_min_radius": 20.0,
-        "spiral_max_radius": 50.0,
-        "spiral_turns": 6,
-        "spiral_points_per_rev": 250,
-        "spiral_z_start": -5.0,
-        "spiral_z_end": TARGET_Z,
-        "nees_ds_stride": 0,
-        "nees_ds_alpha": 0.05,
-    }
-
-    if config_overrides:
-        base_config.update(config_overrides)
-
-    t0 = time.perf_counter()
-    (
-        times,
-        true_pos,
-        est_pos,
-        true_vel,
-        est_vel,
-        Ppos,
-        Pfull,
-        nis_logs,
-    ) = run_ekf_acoustics(
-        target_names=target_names,
-        verbose=False,
-        sim_config=base_config,
-        rng=rng,
-    )
-    runtime = time.perf_counter() - t0
-
-    distance_true_m = path_length(true_pos)
-    distance_est_m = path_length(est_pos)
-
-    dt_est = float(times[1] - times[0]) if len(times) > 1 else 1.0 / float(DEFAULT_TICKS_PER_SEC)
-    base_config["dt"] = dt_est
-    base_config["ticks_per_sec"] = float(1.0 / dt_est) if dt_est > 0 else DEFAULT_TICKS_PER_SEC
-
-    pos_rmse, pos_axis = compute_rmse(true_pos, est_pos)
-    vel_rmse, vel_axis = compute_rmse(true_vel, est_vel)
-    final_err = float(np.linalg.norm(est_pos[-1] - true_pos[-1]))
-
-    state_err = np.hstack((est_pos - true_pos, est_vel - true_vel))
-    nees_full = calculate_nees(state_err, Pfull)
-    nees_pos = calculate_nees(state_err, Pfull, indices=[0, 1, 2])
-    nees_full_test = nees_consistency_test(nees_full, dof=6)
-    nees_pos_test = nees_consistency_test(nees_pos, dof=3)
-    ds_stride = int(base_config.get("nees_ds_stride", 0) or 0)
-    nees_full_ds = None
-    if ds_stride > 0:
-        from validation_metrics import downsampled_mean_nees_test
-
-        nees_full_ds = downsampled_mean_nees_test(
-            nees_full,
-            dof=6,
-            stride=ds_stride,
-            alpha=float(base_config.get("nees_ds_alpha", 0.05)),
-        )
-
-    nis_results: Dict[str, Optional[Dict[str, Any]]] = {}
-    for key in ("dvl", "depth", "acoustic"):
-        vals = np.array(nis_logs[key]["values"])
-        if vals.size == 0:
-            nis_results[key] = None
-            continue
-        nis_results[key] = nis_consistency_test(vals, dof=nis_logs[key]["dof"])
-
-    trial: Dict[str, Any] = {
-        "seed": int(seed),
-        "runtime_seconds": float(runtime),
-        "pos_rmse_total": float(pos_rmse),
-        "pos_rmse_xyz": pos_axis.tolist(),
-        "vel_rmse_total": float(vel_rmse),
-        "vel_rmse_xyz": vel_axis.tolist(),
-        "final_position_error": final_err,
-        "distance_true_m": distance_true_m,
-        "distance_est_m": distance_est_m,
-        "nees_full": nees_full_test,
-        "nees_full_ds_mean": nees_full_ds,
-        "nees_pos": nees_pos_test,
-        "nis": nis_results,
-        "config": base_config,
-    }
-
-    if return_timeseries:
-        trial["timeseries"] = {
-            "t": np.asarray(times),
-            "true_pos": np.asarray(true_pos),
-            "est_pos": np.asarray(est_pos),
-            "true_vel": np.asarray(true_vel),
-            "est_vel": np.asarray(est_vel),
-            "Ppos": np.asarray(Ppos),
-            "Pfull": np.asarray(Pfull),
-        }
-
-    return trial
-
-
-def main(target_names=None, verbose=False, trajectory="lawnmower"):
+def main(target_names=None, verbose=False):
     print("\nRunning EKF fusion: IMU + DVL + Depth + Acoustic_1...")
     (times,
      true_pos,
@@ -978,17 +768,11 @@ def main(target_names=None, verbose=False, trajectory="lawnmower"):
      est_vel,
         Ppos,
         Pfull,
-        nis_logs) = run_ekf_acoustics(
-        target_names=target_names,
-        verbose=verbose,
-        sim_config={"trajectory": trajectory},
-    )
+        nis_logs) = run_ekf_acoustics(target_names=target_names, verbose=verbose)
 
     pos_rmse, pos_axis = compute_rmse(true_pos, est_pos)
     vel_rmse, vel_axis = compute_rmse(true_vel, est_vel)
     final_err = np.linalg.norm(est_pos[-1] - true_pos[-1])
-    distance_true_m = path_length(true_pos)
-    distance_est_m = path_length(est_pos)
 
     print("\n========== EKF FUSION RESULTS ==========")
     print(f"  Position RMSE total  : {pos_rmse:.3f} m")
@@ -996,8 +780,6 @@ def main(target_names=None, verbose=False, trajectory="lawnmower"):
     print(f"  Velocity RMSE total  : {vel_rmse:.3f} m/s")
     print(f"    axes (x,y,z)       : {vel_axis}")
     print(f"  Final position error : {final_err:.3f} m")
-    print(f"  Distance traveled (true) : {distance_true_m:.1f} m")
-    print(f"  Distance traveled (est)  : {distance_est_m:.1f} m")
     print("=======================================\n")
 
     # === Consistency metrics ===
@@ -1154,9 +936,7 @@ if __name__ == "__main__":
     parser.add_argument("--target-name", type=str, action="append",
                         help="Target agent name (e.g., usv1); repeat to specify multiple")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--trajectory", choices=["lawnmower", "spiral", "concentric", "figure8"], default="lawnmower",
-                        help="Select trajectory for XY waypoints")
     args = parser.parse_args()
-    main(target_names=args.target_name, verbose=args.verbose, trajectory=args.trajectory)
+    main(target_names=args.target_name, verbose=args.verbose)
 
 # End of script
