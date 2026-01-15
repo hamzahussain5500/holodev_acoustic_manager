@@ -1,0 +1,5 @@
+{
+  "rmse_pos": 1.27512374315981,
+  "final_pos_err": 1.7203017618038874,
+  "out_dir": "results_modem_switching/policy_spiral_seed13_T120"
+}

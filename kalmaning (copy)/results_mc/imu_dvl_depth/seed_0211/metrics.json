@@ -1,0 +1,13 @@
+{
+  "seed": 211,
+  "runtime_seconds": 30.260170788000323,
+  "pos_rmse": 0.5379399455052024,
+  "vel_rmse": 0.037867735737025836,
+  "final_error": 0.3791563907012702,
+  "nees_pct": 96.91666666666666,
+  "nis_dvl_pct": 73.94444444444444,
+  "nis_depth_pct": 95.32455742169769,
+  "nis_acoustic_pct": null,
+  "failed": false,
+  "error": null
+}

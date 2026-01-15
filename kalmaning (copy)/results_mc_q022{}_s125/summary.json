@@ -1,0 +1,107 @@
+{
+  "runs": 15,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "config": {
+    "use_currents": false,
+    "use_dvl_update": true,
+    "use_depth_update": true,
+    "use_acoustic_updates": true,
+    "acoustic_period_ticks": 100,
+    "dvl_measurement_std": 0.3,
+    "depth_measurement_std": 0.0375,
+    "acoustic_measurement_std": 0.125,
+    "dvl_extra_std": 0.0,
+    "depth_extra_std": 0.0,
+    "range_extra_std": 0.0,
+    "imu_accel_extra_std": 0.0,
+    "imu_bias_rw_std": 0.0,
+    "q_pos_std": 0.0,
+    "q_vel_std": 0.22,
+    "p_pos_std_init": 1.0,
+    "p_vel_std_init": 1.0,
+    "waypoint_spacing": 12.5,
+    "dt": 0.01,
+    "ticks_per_sec": 100.0
+  },
+  "pos_rmse_total": {
+    "mean": 0.6411314152620354,
+    "std": 0.32829557151549266,
+    "ci": [
+      0.474990933196584,
+      0.8072718973274868
+    ]
+  },
+  "vel_rmse_total": {
+    "mean": 0.06856619960334849,
+    "std": 0.008003085780118203,
+    "ci": [
+      0.06451607939191198,
+      0.072616319814785
+    ]
+  },
+  "final_position_error": {
+    "mean": 0.7517098814101462,
+    "std": 0.6411082054553552,
+    "ci": [
+      0.42726436477166574,
+      1.0761553980486265
+    ]
+  },
+  "nees_consistency_rate": 0.0,
+  "nees_full_avg": {
+    "mean": 10.570477393411279,
+    "std": 1.2761773347304732,
+    "ci": [
+      9.924642554353396,
+      11.216312232469162
+    ]
+  },
+  "nees_pos_avg": {
+    "mean": 5.980083049986016,
+    "std": 1.0979800726317062,
+    "ci": [
+      5.424428467978709,
+      6.535737631993323
+    ]
+  },
+  "nis_dvl_avg": {
+    "mean": 4.543400513721118,
+    "std": 0.09961837590189736,
+    "ci": [
+      4.492986659770799,
+      4.593814367671437
+    ]
+  },
+  "nis_depth_avg": {
+    "mean": 0.634751764713118,
+    "std": 0.014791116144549426,
+    "ci": [
+      0.6272664271704959,
+      0.6422371022557402
+    ]
+  },
+  "nis_acoustic_avg": {
+    "mean": 0.4274570511747739,
+    "std": 0.13459119080491952,
+    "ci": [
+      0.35934451094503994,
+      0.49556959140450785
+    ]
+  }
+}

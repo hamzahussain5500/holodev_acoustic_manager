@@ -1,0 +1,106 @@
+{
+  "seed": 1,
+  "pos_rmse_total": 1.251681289623226,
+  "vel_rmse_total": 0.044384296553433504,
+  "final_position_error": 1.4265408177353085,
+  "runtime_seconds": 30.262862702002167,
+  "dropout_intervals": {
+    "usv2": [
+      [
+        30.0,
+        100.0
+      ]
+    ],
+    "usv4": [
+      [
+        50.0,
+        130.0
+      ]
+    ]
+  },
+  "disabled_seconds": {
+    "usv2": 70.0,
+    "usv4": 80.0
+  },
+  "config": {
+    "use_currents": false,
+    "use_dvl_update": true,
+    "use_depth_update": true,
+    "use_acoustic_updates": true,
+    "enable_dvl": true,
+    "enable_depth": true,
+    "enable_acoustic": true,
+    "use_all_acoustic": true,
+    "acoustic_period_ticks": 100,
+    "dvl_measurement_std": 0.24,
+    "depth_measurement_std": 0.03,
+    "acoustic_measurement_std": 0.1,
+    "dvl_extra_std": 0.0,
+    "depth_extra_std": 0.0,
+    "range_extra_std": 0.0,
+    "imu_accel_extra_std": 0.0,
+    "imu_bias_rw_std": 0.0,
+    "q_pos_std": 0.0,
+    "q_vel_std": 0.085,
+    "p_pos_std_init": 1.0,
+    "p_vel_std_init": 1.0,
+    "waypoint_spacing": 12.5,
+    "trajectory": "spiral",
+    "spiral_center": [
+      200.0,
+      -200.0
+    ],
+    "spiral_min_radius": 20.0,
+    "spiral_max_radius": 50.0,
+    "spiral_turns": 6,
+    "spiral_points_per_rev": 250,
+    "spiral_z_start": -5.0,
+    "spiral_z_end": -90.0,
+    "nees_ds_stride": 0,
+    "nees_ds_alpha": 0.05,
+    "duration_sec": 180.0,
+    "modem_dropout_intervals": {
+      "usv2": [
+        [
+          30.0,
+          100.0
+        ]
+      ],
+      "usv4": [
+        [
+          50.0,
+          130.0
+        ]
+      ]
+    },
+    "modem_dropout_mode": "ignore_updates",
+    "dt": 0.01,
+    "ticks_per_sec": 100.0
+  },
+  "nees": {
+    "is_consistent": false,
+    "avg_nees": 28.07183082849109,
+    "expected_nees": 6,
+    "lower_bound": 5.949499268822778,
+    "upper_bound": 6.050711209328138,
+    "percent_inside_bounds": 26.961111111111112,
+    "per_sample_bounds": [
+      1.2373442457912027,
+      14.44937533544792
+    ],
+    "num_samples": 18000
+  },
+  "nis_acoustic": {
+    "is_consistent": false,
+    "avg_nis": 0.26324022998620533,
+    "expected_nis": 1,
+    "lower_bound": 0.78028237983232,
+    "upper_bound": 1.2465596647553336,
+    "percent_inside_bounds": 96.45390070921985,
+    "per_sample_bounds": [
+      0.0009820691171752555,
+      5.023886187314888
+    ],
+    "num_samples": 141
+  }
+}

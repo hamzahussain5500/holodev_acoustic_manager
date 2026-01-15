@@ -1,0 +1,59 @@
+{
+  "seed": 1,
+  "config_overrides": {
+    "duration_sec": 600.0,
+    "trajectory": "spiral",
+    "use_currents": false,
+    "modem_selector_fn": "selector_fn_wrapped"
+  },
+  "return_timeseries": true,
+  "target_names": [
+    "usv1",
+    "usv2",
+    "usv3",
+    "usv4"
+  ],
+  "cli_args": {
+    "outdir": "results_modem_switching",
+    "duration": 600.0,
+    "seed": 1,
+    "traj": "spiral",
+    "currents": false,
+    "mode": "policy",
+    "policy_type": "gdop",
+    "targets": [
+      "usv1",
+      "usv2",
+      "usv3",
+      "usv4"
+    ],
+    "dropout": [
+      "usv1:150-220",
+      "usv2:300-420"
+    ],
+    "sigma_r": 0.5,
+    "gdop_xy": 15.0,
+    "gdop_3d": 12.0,
+    "switch_margin": 0.3,
+    "min_dwell_sec": 10.0,
+    "size_penalty": 0.2,
+    "score_margin": 0.05,
+    "power_save_tol": 0.02,
+    "rank_req_xy": 2,
+    "rank_req_3d": 3,
+    "soc_init": 1.0,
+    "soc_min": 0.0,
+    "base_drain_w": 0.0,
+    "beacon_drain_w": 1.0,
+    "drain_scale": 1.0,
+    "low_power_soc": 0.1,
+    "target_unc_xy": 5.0,
+    "target_unc_3d": 8.0,
+    "mission_phase": "cruise",
+    "phase_schedule": null,
+    "min_beacons_xy": 2,
+    "min_beacons_3d": 3,
+    "allow_one_beacon": false,
+    "allow_zero_beacons": false
+  }
+}

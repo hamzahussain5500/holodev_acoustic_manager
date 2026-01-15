@@ -1,0 +1,2 @@
+config,n_runs,failures,pos_rmse_mean,pos_rmse_std,vel_rmse_mean,vel_rmse_std,final_err_median,final_err_p90,final_err_p95,nees_pct_in_bounds,nis_dvl_pct,nis_depth_pct,nis_acoustic_pct
+imu_dvl_depth,20,0,1.2168256975548897,0.5034726585516592,0.04698645213295895,0.004282037181427999,1.321546185158515,3.0032712565533135,3.1106787494872874,92.62472222222223,72.4125,94.8162806129287,nan

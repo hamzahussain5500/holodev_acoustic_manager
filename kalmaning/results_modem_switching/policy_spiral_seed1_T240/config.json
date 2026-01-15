@@ -1,0 +1,16 @@
+{
+  "seed": 1,
+  "config_overrides": {
+    "duration_sec": 240.0,
+    "trajectory": "spiral",
+    "use_currents": false,
+    "modem_selector_fn": "selector_fn_wrapped"
+  },
+  "return_timeseries": true,
+  "target_names": [
+    "usv1",
+    "usv2",
+    "usv3",
+    "usv4"
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "runs": 15,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "config": {
+    "use_currents": false,
+    "use_dvl_update": true,
+    "use_depth_update": true,
+    "use_acoustic_updates": true,
+    "acoustic_period_ticks": 100,
+    "dvl_measurement_std": 0.24,
+    "depth_measurement_std": 0.03,
+    "acoustic_measurement_std": 0.1,
+    "dvl_extra_std": 0.0,
+    "depth_extra_std": 0.0,
+    "range_extra_std": 0.0,
+    "imu_accel_extra_std": 0.0,
+    "imu_bias_rw_std": 0.0,
+    "q_pos_std": 0.0,
+    "q_vel_std": 0.18,
+    "p_pos_std_init": 1.0,
+    "p_vel_std_init": 1.0,
+    "waypoint_spacing": 12.5,
+    "dt": 0.01,
+    "ticks_per_sec": 100.0
+  },
+  "pos_rmse_total": {
+    "mean": 0.5607723310399251,
+    "std": 0.2198757143950449,
+    "ci": [
+      0.44949986697516264,
+      0.6720447951046875
+    ]
+  },
+  "vel_rmse_total": {
+    "mean": 0.06367808583345509,
+    "std": 0.006069672366250116,
+    "ci": [
+      0.060606407807909275,
+      0.0667497638590009
+    ]
+  },
+  "final_position_error": {
+    "mean": 0.6050372781443303,
+    "std": 0.431774598424098,
+    "ci": [
+      0.38652918315343854,
+      0.823545373135222
+    ]
+  },
+  "nees_consistency_rate": 0.0,
+  "nees_full_avg": {
+    "mean": 16.627588940421123,
+    "std": 1.1349978080356997,
+    "ci": [
+      16.053200799576576,
+      17.20197708126567
+    ]
+  },
+  "nees_pos_avg": {
+    "mean": 9.975310703600085,
+    "std": 1.1568171858920882,
+    "ci": [
+      9.38988043404605,
+      10.56074097315412
+    ]
+  },
+  "nis_dvl_avg": {
+    "mean": 7.026936517536915,
+    "std": 0.14939511822464638,
+    "ci": [
+      6.951332156364786,
+      7.102540878709044
+    ]
+  },
+  "nis_depth_avg": {
+    "mean": 1.0005316616856321,
+    "std": 0.023685046681228932,
+    "ci": [
+      0.9885453742824942,
+      1.01251794908877
+    ]
+  },
+  "nis_acoustic_avg": {
+    "mean": 0.6302979838991747,
+    "std": 0.16163183527808586,
+    "ci": [
+      0.548500989482643,
+      0.7120949783157063
+    ]
+  }
+}
