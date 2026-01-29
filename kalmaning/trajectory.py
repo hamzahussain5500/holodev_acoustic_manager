@@ -10,7 +10,7 @@ import numpy as np
 from typing import Iterable, Tuple
 
 
-SPAWN_POINT = np.array([-100.0, -700.0, -5.0])
+SPAWN_POINT = np.array([220.0, -230.0, -5.0])
 SCALE_FACTOR = 3.0
 
 

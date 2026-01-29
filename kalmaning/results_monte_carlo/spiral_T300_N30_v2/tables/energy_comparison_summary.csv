@@ -1,0 +1,4 @@
+algorithm,avg_beacons_mean,energy_mean_Wh,energy_std_Wh,energy_pct_of_all4,energy_savings_pct_vs_all4
+imu_dvl_depth,4.0,0.0,0.0,0.0,100.0
+imu_dvl_depth_all4,4.0,33.33333333332669,7.226896453227138e-15,100.0,0.0
+adaptive,2.000066666666667,30.00011111110515,7.226896453227138e-15,90.00033333333339,9.999666666666618
