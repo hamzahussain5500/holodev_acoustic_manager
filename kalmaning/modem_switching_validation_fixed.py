@@ -1088,6 +1088,7 @@ def main():
 
     # Wrapper to match run_ekf_acoustics selector signature and print switching events
     last_active_state = {"names": None}
+    soc_warn_state = {"low_power": False, "min": False}
 
     def selector_fn_wrapped(t_current: float, ekf_state: np.ndarray, depth_available: bool, target_info: List[Tuple[str, np.ndarray]], covariance: Optional[np.ndarray] = None):
         payload = selector_fn(t_current, ekf_state, depth_available, target_info, covariance=covariance)
@@ -1098,6 +1099,16 @@ def main():
             print(f"[selector] t={float(t_current):.2f}s active={list(new_active)} (initial)")
         elif new_active != prev_active:
             print(f"[selector] t={float(t_current):.2f}s active {list(prev_active)} -> {list(new_active)}")
+
+        soc_val = payload.get("soc", None)
+        if isinstance(soc_val, (int, float, np.floating)):
+            soc_val = float(soc_val)
+            if (not soc_warn_state["low_power"]) and soc_val <= float(args.low_power_soc):
+                print(f"[WARN] t={float(t_current):.2f}s SOC={soc_val:.3f} below low_power threshold ({float(args.low_power_soc):.3f}).")
+                soc_warn_state["low_power"] = True
+            if (not soc_warn_state["min"]) and soc_val <= float(args.soc_min):
+                print(f"[WARN] t={float(t_current):.2f}s SOC={soc_val:.3f} below minimum threshold ({float(args.soc_min):.3f}).")
+                soc_warn_state["min"] = True
 
         last_active_state["names"] = new_active
         return payload

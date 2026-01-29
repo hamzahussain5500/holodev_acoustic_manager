@@ -1,0 +1,13 @@
+{
+  "seed": 6,
+  "algorithm": "adaptive",
+  "pos_rmse": 1.0235680979543587,
+  "final_error": 0.6802734851274135,
+  "energy_Wh": 0.444444444444435,
+  "switch_count": 1.0,
+  "pct_active_0": 0.16666666666666666,
+  "pct_active_1": 0.0,
+  "pct_active_2": 0.0,
+  "pct_active_3": 0.0,
+  "pct_active_4": 0.8333333333333334
+}

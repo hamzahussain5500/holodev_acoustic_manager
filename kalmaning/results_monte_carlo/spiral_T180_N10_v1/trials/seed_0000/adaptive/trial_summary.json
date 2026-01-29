@@ -1,0 +1,17 @@
+{
+  "seed": 0,
+  "algorithm": "adaptive",
+  "pos_rmse": 0.9717571773652639,
+  "final_error": 0.5284198203035073,
+  "energy_Wh": 1.861166666666627,
+  "switch_count": 2.0,
+  "avg_beacons": 2.4668,
+  "nees_pct": 23.813333333333333,
+  "nis_acoustic_pct": 91.30434782608695,
+  "crlb_eff": 1.1094424415062503,
+  "pct_active_0": 0.03333333333333333,
+  "pct_active_1": 0.0,
+  "pct_active_2": 0.6999333333333333,
+  "pct_active_3": 0.0,
+  "pct_active_4": 0.2667333333333333
+}

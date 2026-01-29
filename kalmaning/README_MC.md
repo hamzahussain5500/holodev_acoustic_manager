@@ -1,93 +1,140 @@
-# HoloOcean EKF Monte Carlo Harness
+# HoloOcean EKF Monte Carlo Harness (Detailed Guide)
 
-This repo contains a small set of scripts to run and evaluate a 6D EKF (IMU + DVL + depth + acoustic) in HoloOcean, plus trajectory generators and consistency metrics.
+This guide explains what happens inside the Monte Carlo runner, how data flows through the EKF, and how to run experiments using the YAML configuration workflow.
 
-## Scripts
+## What the Monte Carlo runner does (high-level)
 
-- `current_acoustic_EKF_patched.py`
-  - Runs a single EKF simulation in HoloOcean using IMU/DVL/depth/acoustic fusion.
-  - Accepts a trajectory choice and target names for acoustic ranging.
-  - Produces on-screen metrics (RMSE, NEES/NIS) and plots when run directly.
+`monte_carlo_runner.py` repeatedly runs the EKF simulation under controlled random seeds and aggregates performance metrics.
 
-- `monte_carlo_runner.py`
-  - Monte Carlo harness that launches many independent EKF trials with different seeds.
-  - Aggregates RMSE/final-error stats, NEES/NIS summaries, and run-level consistency rate.
-  - Writes `summary.json`, `per_run.csv`, `per_run.jsonl`, and plots under the chosen output directory.
+**Core loop:**
+1. Load configuration from YAML (`mc_config.yaml`) and apply minimal CLI overrides (`--outdir`, `--duration`, `--runs`).
+2. Generate common random streams per seed (initial state perturbations and sensor noise) so all algorithms share the same randomness.
+3. Run each algorithm for every seed, collecting time-series and summary metrics.
+4. Write per-run outputs (CSV, JSON) and per-experiment plots/tables (CDFs, boxplots, CI bands, energy/accuracy trade-offs).
+5. Print “main findings” with RMSE, NEES/NIS coverage, energy savings, and consistency notes.
 
-- `trajectory.py`
-  - Provides waypoint generators: `lawnmower`, `spiral`, `concentric`, `figure8` (lemniscate).
-  - The runner/ EKF selects a trajectory via `--trajectory` (MC) or `--trajectory` (single run).
+## Algorithms compared
 
-- `validation_metrics.py`
-  - Consistency utilities: NEES/NIS calculation, chi-square bounds, and optional downsampled mean-NEES test to mitigate time-correlation.
+The runner evaluates three baseline variants plus adaptive modem selection:
 
-- `kalman_utils.py`
-  - EKF core (state, predict, linear update, range update) and RMSE helper.
+- `imu_dvl_depth` — no acoustics (DVL+depth only).
+- `imu_dvl_depth_all4` — acoustics always on, all 4 beacons.
+- `adaptive` — uses a modem selector; policy configured by `adaptive_policy`.
 
-## Common options (applied through `config_overrides` into the EKF)
+Adaptive policies (choose one in YAML or run explicitly):
+- `gdop` — geometry-based (rank/GDOP + dwell/margin).
+- `weighted` — mission-aware multi-objective scoring.
+- `v2` — uncertainty + energy-aware selector with SOC gating.
 
-Process / measurement tuning:
-- `--q-vel-std` : accel process noise std (sigma_a) used in EKF Q.
-- `--meas-scale`: scales DVL/depth/acoustic measurement stds uniformly.
-- `--dvl-extra-std`, `--depth-extra-std`, `--range-extra-std`: injected extra measurement noise.
-- `--imu-accel-extra-std`, `--imu-bias-rw-std`: injected IMU noise / bias random walk.
+You can also run `adaptive_gdop`, `adaptive_weighted`, or `adaptive_v2` explicitly in `algorithms`.
 
-Consistency controls (MC runner):
-- `--consistency-percent` (default 90): required % of NEES samples inside per-sample chi² gate.
-- `--consistency-avg-band LO HI`: optional band on avg NEES as multiples of dof (e.g., `0.7 1.3`).
-- `--consistency-require-ds`: require downsampled mean-NEES chi² test to pass.
-- `--nees-ds-stride`, `--nees-ds-alpha`: stride/alpha for the downsampled mean-NEES test.
+## Data flow (detailed)
 
-Trajectory selection:
-- `--trajectory {lawnmower,spiral,concentric,figure8}`
+**Entry point**: `run_mc_new(args)`
 
-Currents and targets:
-- `--currents {on,off}`
-- `--target-name usv1 --target-name usv2` (repeatable; acoustic targets)
+- Reads configuration (YAML + CLI).
+- For each `seed` and `algorithm`:
+  - Builds a per-run `config_overrides` dict for the EKF.
+  - Calls `run_single_trial(...)` in `current_acoustic_EKF_patched.py`.
+  - Collects:
+    - RMSE and final error
+    - NEES/NIS coverage
+    - time-series (positions, covariance, NIS logs, active beacons, GDOP)
+    - energy usage estimates
+    - selector metadata (for adaptive policies)
 
-## How to run
+**Outputs** are written under the run’s `--outdir`:
 
-### Single EKF run (with plots)
+- `configs/config.json` — resolved settings for traceability.
+- `trials/seed_####/<algorithm>/timeseries.csv` — per-step time-series.
+- `trials/seed_####/<algorithm>/trial_summary.json` — per-run summary.
+- `tables/per_run_metrics.csv` — row per run with summary metrics.
+- `tables/summary_metrics.csv` — aggregated algorithm summaries.
+- `tables/policy_summary.csv` — policy-level summary including CI, energy savings.
+- `figures/*.png` — plots (CDFs, boxplots, CI bands, energy, GDOP, etc.).
+
+## Trajectory handling
+
+The EKF uses `trajectory.py` to generate waypoint paths (spiral, lawnmower, concentric, figure8). The Monte Carlo runner passes trajectory choice via EKF overrides. The saved plot
+`figures/traj_xy.png` shows the ground-truth path once per run.
+
+## Consistency metrics (NEES/NIS)
+
+- **NEES (state)**: compares estimation error vs covariance. Expected bounds derived from chi-square distribution.
+- **NIS (measurement)**: compares innovation vs measurement covariance.
+
+The runner reports coverage percentages and plots mean series with 95% CI bands.
+
+## Energy and switching metrics
+
+The adaptive policies track:
+- active beacon count vs time
+- estimated SOC and energy usage
+- switch counts
+
+These are saved to tables and plotted as CI bands.
+
+## Configuration workflow (YAML first)
+
+Only three CLI flags remain:
+
+- `--outdir` (output folder)
+- `--duration` (seconds)
+- `--runs` (number of runs)
+
+All other settings are loaded from `mc_config.yaml`.
+
+### Example config: `mc_config.yaml`
+
+Key settings include:
+- `algorithms` and `adaptive_policy`
+- `seeds` (null means auto range)
+- sensor noise and random stream stds
+- energy model (`battery_wh`, `base_drain_w`, `beacon_drain_w`)
+- adaptive policy parameters (`min_dwell_sec`, `switch_margin`, etc.)
+
+## How to run (examples)
+
+### 1) Basic run (YAML config only)
 ```bash
-python current_acoustic_EKF_patched.py --trajectory spiral --target-name usv1 --target-name usv2
+/usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_T10_N5 --duration 10 --runs 5
 ```
-Runs one simulated mission with a spiral path; shows RMSE/NEES/NIS and plots.
 
-### Monte Carlo batch
+### 2) Explicit adaptive policies in one run
 ```bash
-# Basic 20-run batch, no currents, default lawnmower
-python monte_carlo_runner.py --runs 20 --seed 0 --currents off
-
-# Tuned noise + spiral trajectory + consistency gates
-python monte_carlo_runner.py \
-  --runs 30 --seed 0 --currents off --trajectory spiral \
-  --q-vel-std 0.22 --meas-scale 1.5 \
-  --consistency-percent 90 --consistency-avg-band 0.7 1.3 \
-  --consistency-require-ds --nees-ds-stride 10
-
-# Save decimated timeseries for each run
-python monte_carlo_runner.py --runs 10 --seed 100 --save-timeseries decimated --out results_mc_ts
+/usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_T30_N5 --duration 30 --runs 5
+```
+In `mc_config.yaml`, set:
+```yaml
+algorithms:
+  - adaptive_gdop
+  - adaptive_weighted
+  - adaptive_v2
 ```
 
-Outputs go to `--out` (default `results_mc/`):
-- `summary.json`: mean/std/CI for RMSE, final error (plus median/p90/p95), NEES/NIS means, run-consistency rate.
-- `per_run.csv` / `per_run.jsonl`: per-trial metrics including `run_consistent` flag.
-- Plots: histograms/CDF/boxplots in the output directory.
-- Optional timeseries: `timeseries/run_XXX.npz` and `timeseries_mean.npz` when enabled.
-
-### Trajectory-only inspection
-Call the factory directly (Python REPL) to visualize or reuse waypoints:
-```python
-from trajectory import build_trajectory
-wps = build_trajectory("figure8", {"figure8_scale": 25.0, "figure8_turns": 2})
+### 3) Monte Carlo with fixed seeds
+```yaml
+seeds: [0, 1, 2, 3, 4]
+```
+```bash
+/usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_fixed --duration 20 --runs 5
 ```
 
-## Notes on consistency
-- Run-level consistency uses: (a) percent of NEES samples inside per-sample chi² gate, AND
-  optional (b) avg-NEES band, AND optional (c) downsampled mean-NEES chi² test. This is less brittle than a strict full-length mean-NEES test on correlated data.
-- NIS/NEES are reported per sensor and for the full/position state; per-run `run_consistent` is stored in CSV/JSONL.
+## Where to find results
+
+After a run, check:
+- `figures/` for plots (CDFs, CI bands, energy/accuracy, GDOP, FIM logdet)
+- `tables/` for CSV/MD summaries
+- `trials/` for per-seed timeseries and metadata
+
+## Single-run EKF (for debugging)
+
+```bash
+/usr/bin/python current_acoustic_EKF_patched.py --trajectory spiral --target-name usv1 --target-name usv2
+```
 
 ## Tips
-- Start with `--currents off` for repeatability; enable later if desired.
-- Tune `--q-vel-std` and `--meas-scale` together to steer NEES/NIS toward expected dof.
-- Use `--save-timeseries decimated` during sweeps to keep files small.
+
+- Use small durations for quick iteration; increase for publication-quality results.
+- If you want more switching in v2, reduce `min_dwell_sec` and `switch_margin`, and increase `energy_weight`.
+- Keep `seeds` explicit for reproducibility in comparisons.

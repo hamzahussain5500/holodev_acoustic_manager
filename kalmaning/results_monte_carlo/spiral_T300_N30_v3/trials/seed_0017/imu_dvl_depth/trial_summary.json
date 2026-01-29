@@ -1,0 +1,17 @@
+{
+  "seed": 17,
+  "algorithm": "imu_dvl_depth",
+  "pos_rmse": 1.1879595186793004,
+  "final_error": 1.5896255298391797,
+  "energy_Wh": 0.0,
+  "switch_count": 0.0,
+  "avg_beacons": 4.0,
+  "nees_pct": 93.99666666666666,
+  "nis_acoustic_pct": NaN,
+  "crlb_eff": 0.6778284083358577,
+  "pct_active_0": 0.0,
+  "pct_active_1": 0.0,
+  "pct_active_2": 0.0,
+  "pct_active_3": 0.0,
+  "pct_active_4": 1.0
+}

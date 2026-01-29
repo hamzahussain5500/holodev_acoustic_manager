@@ -47,7 +47,7 @@ USV_BEACON_ID_4      = 4
 # Simulation timing
 DEFAULT_TICKS_PER_SEC = 100
 # Default to shorter runs to keep Monte Carlo batches fast; override via config.
-SIM_DURATION_SEC = 6000
+SIM_DURATION_SEC = 300
 
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
@@ -435,6 +435,7 @@ def run_ekf_acoustics(
     sim_config: Optional[Dict[str, Any]] = None,
     rng: Optional[np.random.Generator] = None,
     debug_steps: bool = False,
+    random_streams: Optional[Any] = None,
 ):
     """Run one EKF fusion with IMU + DVL + Depth + Acoustic ranges (multi-target ready).
 
@@ -652,6 +653,38 @@ def run_ekf_acoustics(
 
         duration_sec = float(cfg.get("duration_sec", SIM_DURATION_SEC))
         n_steps = int(duration_sec * ticks_per_sec)
+        noise_streams = None
+        x0_perturb = None
+        if random_streams is not None:
+            if hasattr(random_streams, "build"):
+                built = random_streams.build(n_steps=n_steps, dt=dt)
+            else:
+                built = random_streams
+            if isinstance(built, dict):
+                x0_perturb = built.get("x0_perturb") or built.get("x0")
+                noise_streams = built.get("noise_streams") or built.get("streams")
+                if noise_streams is None:
+                    noise_streams = built
+
+        def _stream_noise(key: str, idx: int, size: int):
+            if noise_streams is None:
+                return None
+            arr = noise_streams.get(key) if isinstance(noise_streams, dict) else None
+            if arr is None:
+                return None
+            arr = np.asarray(arr)
+            if arr.ndim == 1:
+                if idx >= arr.shape[0]:
+                    return None
+                return float(arr[idx])
+            if arr.ndim == 2:
+                if idx >= arr.shape[0]:
+                    return None
+                row = arr[idx]
+                if row.shape[0] < size:
+                    return None
+                return row[:size]
+            return None
         prev_true_pos = None
         clock = 0
         sim_tick = 0  # counts env.step() calls (true simulation time base)
@@ -663,6 +696,18 @@ def run_ekf_acoustics(
         trajectory_name = cfg.get("trajectory", "lawnmower")
         waypoints = np.asarray(build_trajectory(trajectory_name, cfg), dtype=float)
         has_z_in_waypoints = waypoints.shape[1] >= 3
+
+        def _trajectory_xyz() -> np.ndarray:
+            if waypoints.size == 0:
+                return np.empty((0, 3), dtype=float)
+            if has_z_in_waypoints:
+                return waypoints[:, :3]
+            z_col = np.full((waypoints.shape[0], 1), TARGET_Z, dtype=float)
+            return np.hstack((waypoints[:, :2], z_col))
+
+        if cfg.get("print_trajectory_summary", False):
+            if not getattr(run_ekf_acoustics, "_printed_traj", False):
+                run_ekf_acoustics._printed_traj = True
 
         for wp in waypoints:
             z_draw = wp[2] if has_z_in_waypoints else TARGET_Z
@@ -703,11 +748,19 @@ def run_ekf_acoustics(
             accel_bias = imu[2, :] if imu.shape[0] >= 3 else np.zeros(3)
             accel_body = accel_meas - accel_bias
 
-            if local_rng is not None and cfg.get("imu_accel_extra_std", 0.0) > 0.0:
-                accel_body = accel_body + local_rng.normal(0.0, cfg["imu_accel_extra_std"], size=3)
+            if cfg.get("imu_accel_extra_std", 0.0) > 0.0:
+                noise = _stream_noise("imu_accel", k, 3)
+                if noise is not None:
+                    accel_body = accel_body + np.asarray(noise, dtype=float) * cfg["imu_accel_extra_std"]
+                elif local_rng is not None:
+                    accel_body = accel_body + local_rng.normal(0.0, cfg["imu_accel_extra_std"], size=3)
 
-            if local_rng is not None and cfg.get("imu_bias_rw_std", 0.0) > 0.0:
-                bias_state += local_rng.normal(0.0, cfg["imu_bias_rw_std"] * np.sqrt(dt), size=3)
+            if cfg.get("imu_bias_rw_std", 0.0) > 0.0:
+                noise = _stream_noise("imu_bias_rw", k, 3)
+                if noise is not None:
+                    bias_state += np.asarray(noise, dtype=float) * cfg["imu_bias_rw_std"] * np.sqrt(dt)
+                elif local_rng is not None:
+                    bias_state += local_rng.normal(0.0, cfg["imu_bias_rw_std"] * np.sqrt(dt), size=3)
                 accel_body = accel_body + bias_state
 
             T_ws = pose
@@ -730,6 +783,13 @@ def run_ekf_acoustics(
             if k == 0:
                 ekf.x[0:3] = true_pos.copy()
                 ekf.x[3:6] = true_vel.copy()
+                if isinstance(x0_perturb, dict):
+                    pos_off = np.asarray(x0_perturb.get("pos", [0.0, 0.0, 0.0]), dtype=float)
+                    vel_off = np.asarray(x0_perturb.get("vel", [0.0, 0.0, 0.0]), dtype=float)
+                    if pos_off.shape[0] >= 3:
+                        ekf.x[0:3] = ekf.x[0:3] + pos_off[:3]
+                    if vel_off.shape[0] >= 3:
+                        ekf.x[3:6] = ekf.x[3:6] + vel_off[:3]
 
             ekf.predict(a_world)
 
@@ -741,8 +801,12 @@ def run_ekf_acoustics(
                 # DVL reports body-frame velocity; transform to world-frame
                 v_world_meas = R_ws @ v_body
 
-                if local_rng is not None and cfg.get("dvl_extra_std", 0.0) > 0.0:
-                    v_world_meas = v_world_meas + local_rng.normal(0.0, cfg["dvl_extra_std"], size=3)
+                if cfg.get("dvl_extra_std", 0.0) > 0.0:
+                    noise = _stream_noise("dvl", k, 3)
+                    if noise is not None:
+                        v_world_meas = v_world_meas + np.asarray(noise, dtype=float) * cfg["dvl_extra_std"]
+                    elif local_rng is not None:
+                        v_world_meas = v_world_meas + local_rng.normal(0.0, cfg["dvl_extra_std"], size=3)
 
                 # Only update if this is actually a new measurement (not held/repeated)
                 if last_dvl is None or not np.allclose(v_world_meas, last_dvl, atol=1e-3):
@@ -772,8 +836,12 @@ def run_ekf_acoustics(
                 prior_x = ekf.x.copy()
                 prior_P = ekf.P.copy()
                 z_meas = float(depth[0])
-                if local_rng is not None and cfg.get("depth_extra_std", 0.0) > 0.0:
-                    z_meas = z_meas + float(local_rng.normal(0.0, cfg["depth_extra_std"]))
+                if cfg.get("depth_extra_std", 0.0) > 0.0:
+                    noise = _stream_noise("depth", k, 1)
+                    if noise is not None:
+                        z_meas = z_meas + float(np.asarray(noise).reshape(-1)[0]) * cfg["depth_extra_std"]
+                    elif local_rng is not None:
+                        z_meas = z_meas + float(local_rng.normal(0.0, cfg["depth_extra_std"]))
 
                 # Only update if new (depth often holds last value between true updates)
                 if last_depth is None or abs(z_meas - last_depth) > 1e-3:
@@ -903,8 +971,12 @@ def run_ekf_acoustics(
                     dz = pz - bz
                     dist_pred = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-9
                     dist_m_noisy = dist_m
-                    if local_rng is not None and cfg.get("range_extra_std", 0.0) > 0.0:
-                        dist_m_noisy = dist_m_noisy + float(local_rng.normal(0.0, cfg["range_extra_std"]))
+                    if cfg.get("range_extra_std", 0.0) > 0.0:
+                        noise = _stream_noise("range", k, 1)
+                        if noise is not None:
+                            dist_m_noisy = dist_m_noisy + float(np.asarray(noise).reshape(-1)[0]) * cfg["range_extra_std"]
+                        elif local_rng is not None:
+                            dist_m_noisy = dist_m_noisy + float(local_rng.normal(0.0, cfg["range_extra_std"]))
 
                     H_range = np.zeros((1, 6))
                     H_range[0, 0] = dx / dist_pred
@@ -1146,6 +1218,7 @@ def run_single_trial(
     return_timeseries: bool = False,
     target_names=None,
     make_plots: bool = False,
+    random_streams: Optional[Any] = None,
 ):
     """Run one EKF simulation with reproducible seed and collect metrics."""
 
@@ -1187,6 +1260,7 @@ def run_single_trial(
         "nees_ds_stride": 0,
         "nees_ds_alpha": 0.05,
         "duration_sec": SIM_DURATION_SEC,
+        "print_trajectory_summary": False,
     }
 
     if config_overrides:
@@ -1214,6 +1288,7 @@ def run_single_trial(
         verbose=False,
         sim_config=base_config,
         rng=rng,
+        random_streams=random_streams,
     )
     runtime = time.perf_counter() - t0
 
@@ -1286,6 +1361,11 @@ def run_single_trial(
         "nis": nis_results,
         "config": base_config,
     }
+
+    if isinstance(random_streams, dict) and ("x0_perturb" in random_streams or "x0" in random_streams):
+        trial["x0_perturb"] = random_streams.get("x0_perturb") or random_streams.get("x0")
+    elif hasattr(random_streams, "x0_perturb"):
+        trial["x0_perturb"] = getattr(random_streams, "x0_perturb")
 
     if return_timeseries:
         trial["timeseries"] = {

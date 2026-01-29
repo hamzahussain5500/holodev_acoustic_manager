@@ -1,0 +1,13 @@
+{
+  "seed": 8,
+  "algorithm": "imu_dvl_depth_all4",
+  "pos_rmse": 0.4503426012328571,
+  "final_error": 0.08171954968522661,
+  "energy_Wh": 0.49999999999998934,
+  "switch_count": 0.0,
+  "pct_active_0": 0.0,
+  "pct_active_1": 0.0,
+  "pct_active_2": 0.0,
+  "pct_active_3": 0.0,
+  "pct_active_4": 1.0
+}
