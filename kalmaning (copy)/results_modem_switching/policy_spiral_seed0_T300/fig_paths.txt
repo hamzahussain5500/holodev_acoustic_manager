@@ -1,4 +1,0 @@
-results_modem_switching/policy_spiral_seed0_T300/fig_active_count.png
-results_modem_switching/policy_spiral_seed0_T300/fig_pos_err.png
-results_modem_switching/policy_spiral_seed0_T300/fig_score_vs_time.png
-results_modem_switching/policy_spiral_seed0_T300/fig_soc_vs_time.png
