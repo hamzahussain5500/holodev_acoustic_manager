@@ -1,128 +1,194 @@
-# HoloOcean EKF + Acoustic Ranging Workspace
+# Adaptive SBL / EKF Toolkit — Integrated Guide
 
-This workspace implements an Extended Kalman Filter (EKF) for an AUV in HoloOcean, fusing IMU, DVL, Depth, and Acoustic range measurements. It includes a reusable acoustic ranging utility and five comparable experiment runs to quantify the effect of different sensor combinations.
+## Abstract (project context)
+Short-baseline (SBL) acoustic positioning systems provide essential navigation capabilities for numerous underwater tasks, but face practical limitations including noise, multipath interference, geometric dilution of precision (GDOP), and hardware failures. The operation of these acoustic arrays is further limited by energy constraints on uncrewed surface vehicles (USVs). Existing research has shown that positional accuracy is related to modem array geometry through Fisher Information Matrix (FIM) analysis, and that the state estimation can be improved by fusing data from sensors such as the Doppler Velocity Logger (DVL) and the Inertial Measurement Unit (IMU). However, there is limited research on managing the acoustic array configuration based on mission requirements and energy constraints.
 
-## Repository Layout
-- `kalmaning/current_acoustic_EKF_patched.py`: Main EKF runner, keyboard control, plotting, and scenario orchestration. Compares five configurations.
-- `kalmaning/kalman_utils.py`: Shared EKF utilities (EKF class, RMSE helper).
-- `kalmaning/four_ranges.py`: Importable acoustic ranging utility (`collect_acoustic_ranges`) + robust `safe_tick`.
-- Other top-level scripts (e.g., `examples.py`, `manual.py`) are unrelated demos.
+This research aims to contribute to the development of an adaptive SBL management framework that dynamically reconfigures four hull-mounted acoustic modems on a USV to balance positional accuracy requirements with energy consumption during collaborative USV–AUV operations.
 
-## Scenario Requirements
-The code assumes a HoloOcean scenario named `usv_auv` with:
-- AUV agent name `auv` with Acoustic Beacon ID `0`.
-- USV agents:
-  - `usv1` with Acoustic Beacon ID `1`
-  - `usv2` with Acoustic Beacon ID `2`
-- Sensors on AUV: `IMUSensor`, `DVLSensor`, `DepthSensor`, `PoseSensor`, `AcousticBeaconSensor`.
-- Sensors on USVs: `PoseSensor` or `LocationSensor` (for beacon position), `AcousticBeaconSensor`.
+The proposed methodology involves:
+1) Quantifying AUV uncertainty using Extended Kalman Filtering with acoustic ranges, IMU data, and DVL velocity estimates.
+2) Assessing observability across modem configurations using FIM/GDOP metrics to predict positional accuracy.
+3) Proposing a multi-objective optimizer that selects modem configurations to maintain mission-specific uncertainty bounds while minimizing energy consumption.
 
-Update `SCENARIO_NAME`, agent names, and beacon IDs in `kalmaning/current_acoustic_EKF_patched.py` if your scenario differs.
+This work advances autonomous navigation by providing an integrated framework for adaptive acoustic array management, with potential extensions to mission duration and operational reliability for marine robotics. Initial validation is conducted via simulation studies, with possible controlled field experiments.
 
-## Dependencies
-- Python 3.9+
-- `holoocean` (environment, agents, sensors)
-- `numpy`, `matplotlib`, `pynput`
+## Repository overview (how everything maps to the abstract)
+This folder contains simulation tools to study adaptive SBL for a USV–AUV team. The toolchain is designed to:
+- Quantify estimation uncertainty with an EKF that fuses IMU, DVL, depth, and acoustic ranges.
+- Evaluate geometry and observability across modem subsets using FIM/GDOP/CRLB.
+- Emulate modem outages and adaptive scheduling to explore energy–accuracy trade-offs.
+- Run Monte Carlo experiments for statistically robust comparisons.
 
-Install:
-```bash
-pip install numpy matplotlib pynput
-# Install HoloOcean per official docs (varies by platform)
-```
+## 1) EKF uncertainty quantification
+Script: current_acoustic_EKF_patched.py
 
-## How It Works
-### EKF State and Updates (`kalman_utils.py`)
-- State: 6D `[x, y, z, vx, vy, vz]`.
-- Predict: converts IMU body acceleration to world frame, subtracts gravity, integrates motion.
-- Linear updates:
-  - DVL: body-frame velocity → world-frame via pose rotation; updates `[vx, vy, vz]`.
-  - Depth: updates `z`.
-- Nonlinear update:
-  - Acoustic range: scalar distance to a known beacon position; standard EKF range measurement update.
-- `compute_rmse(true, est)` reports total and per-axis RMSE for positions/velocities.
+Purpose:
+- Run a single EKF simulation in HoloOcean that fuses IMU, DVL, depth, and acoustic ranges.
+- Produce time series, RMSE, NEES/NIS consistency metrics, and plots.
+- Support adaptive modem selection via a selector function.
 
-### Acoustic Ranging and Scheduling (`current_acoustic_EKF_patched.py`)
-- Periodic non-blocking ranging via an internal round-robin scheduler; sends `MSG_REQX` only when modems are idle.
-- Single-tick discipline: exactly one `env.tick()` per EKF iteration; acoustic send/poll does not call `tick()` internally.
-- On `MSG_RESPX`, parses range and fuses with `ekf.update_range(range_m, beacon_pos, R)` using the USV’s current position.
-- Optional utility `kalmaning/four_ranges.py` remains available for standalone ranging helpers, but the main script uses its own scheduler.
-
-### Currents Model (`current_acoustic_EKF_patched.py`)
-- `vortex_field(location)`: XY swirl field used as example ocean current.
-- `apply_currents(env, state, clock)`: applies currents to vehicles listed in `VEHICLES_FOR_CURRENTS` (default AUV only). Draws a debug vector field once.
-
-### Keyboard Control (`current_acoustic_EKF_patched.py`)
-- `i/k`: forward/backward
-- `j/l`: yaw
-- `w/s`: vertical thrust
-- `a/d`: roll
-
-## Experiments (`current_acoustic_EKF_patched.py`)
-`main()` runs five configurations via `run_ekf_with_control`:
-1. IMU-only
-2. IMU + DVL
-3. IMU + DVL + Depth
-4. IMU + DVL + Depth + Acoustic_1 (one beacon)
-5. IMU + DVL + Depth + Acoustic_2 (two beacons)
-
-Acoustic flags and blocks:
-- `use_acoustic_update_1`: Collects a single range (`num_targets=1`) from `USV_BEACON_ID` (usv1).
-- `use_acoustic_update_2`: Collects two ranges (`num_targets=2`) from `[USV_BEACON_ID, USV2_BEACON_ID]` (usv1 + usv2), with `max_wait_seconds` and `cooldown_ticks` tuned to reduce overlap.
+Key flow:
+- Initialize HoloOcean, build waypoints from trajectory.py, and run one predict/update cycle per env.step.
+- Asynchronous acoustic scheduling: one request in flight, responses processed in the main loop.
+- Optional selector_fn chooses which beacons are active at each tick.
 
 Outputs:
-- Printed metrics (RMSE, final position error) per configuration.
-- Plots: XY trajectory + uncertainty ellipses; Z vs time; Position error vs time; 3D uncertainty “bubble” per configuration.
+- Metrics: RMSE, final error, NEES/NIS coverage.
+- Time series: positions, covariance, NIS, active set, GDOP (if selector provides it).
+- Plots via plot_ekf_outputs(...).
 
-## Running the Experiments
-From workspace root:
-```bash
-python3 kalmaning/current_acoustic_EKF_patched.py
-```
-The script disables HoloOcean viewport (`show_viewport=False`), relies on keyboard inputs, and shows plots at the end.
+Run examples:
+- Single run: python current_acoustic_EKF_patched.py --trajectory spiral --target-name usv1 --target-name usv2
+- With viewport: python current_acoustic_EKF_patched.py --trajectory spiral --show-viewport
 
-## CLI Usage
-- Run default:
-```bash
-python3 kalmaning/current_acoustic_EKF_patched.py
-```
-- Target specific USVs (repeatable):
-```bash
-python3 kalmaning/current_acoustic_EKF_patched.py --target-name usv1 --target-name usv3
-```
-- Verbose modem/ranging logs:
-```bash
-python3 kalmaning/current_acoustic_EKF_patched.py --verbose
-```
+## 2) Geometry and observability analysis (FIM/GDOP)
+Script: fim_gdop_runner.py
 
-## Configuration
-- Scenario and agents: `SCENARIO_NAME`, `AUV_NAME`, `USV_1_NAME`..`USV_4_NAME`.
-- Acoustic IDs and scheduling: `AUV_BEACON_ID`, `USV_BEACON_ID_1..4`, `ACOUSTIC_UPDATE_PERIOD_TICKS`, `timeout_ticks`.
-- Noise levels: process `Q_POS_STD`, `Q_VEL_STD`; initial covariance `P_POS_STD_INIT`, `P_VEL_STD_INIT`; DVL `DVL_VEL_STD`; Depth `DEPTH_STD`; Acoustic `ACOUSTIC_RANGE_STD`.
-- Currents: toggle `USE_CURRENTS`, vehicles `VEHICLES_FOR_CURRENTS`, field parameters in `vortex_field()`.
+Purpose:
+- Evaluate geometry along a trajectory without running the EKF.
+- Compute FIM log-det, GDOP, rank, and CRLB for all subsets.
+- Track best subsets by GDOP or log-det (3D and XY modes).
 
-## Inputs & Outputs
-- Inputs (HoloOcean sensors): `IMUSensor`, `DVLSensor`, `DepthSensor`, `PoseSensor`, `LocationSensor`, `AcousticBeaconSensor`.
-- Console outputs: position/velocity RMSE (total and per-axis), final position error.
-- Figures: XY with 95% covariance ellipses, Z vs time, position error vs time, final 3D uncertainty ellipsoid.
+Key flow:
+- Load trajectory (generated or NPZ/CSV input) and beacon positions.
+- Enumerate subsets, compute Jacobians, and derive FIM metrics.
+- Save time series, summaries, and plots.
 
-## Troubleshooting
-- No beacons: if selected USV beacons aren’t present in the scenario, acoustic fusion is auto-disabled; verify `env.beacons_id`.
-- Modem busy: sends are skipped unless both modems are idle; use `--verbose` to inspect statuses and timeouts.
-- Time sync: do not add `env.tick()` calls inside acoustic logic; the scheduler adheres to single-tick updates.
-- Currents: disable `USE_CURRENTS` for an unforced trajectory if needed.
+Outputs:
+- metrics_timeseries.npz, summary.csv, summary_2d.csv
+- best_subset_timeseries.csv and 2D counterpart
+- Plots for log-det, GDOP, rank, CRLB over time
 
-## Future Work
-- CLI flags: expose configuration toggles (enable/disable DVL/Depth/Acoustic, set periods, waits).
-- Multi-beacon scheduling: formalize a scheduler to interleave targets without overlap; add diagnostics on acoustic channel state.
-- Data logging: export CSV of measurements, states, and covariances for offline analysis.
-- Sensor models: tune noise parameters and include IMU bias estimation.
-- Triangulation: with two ranges, optionally perform multi-lateration or batch updates in the EKF for stronger constraints.
-- Tests: add unit and integration tests for `collect_acoustic_ranges` timing and EKF update correctness.
+Run example:
+- python fim_gdop_runner.py --out results_fim_gdop --sigma-r 0.1 --decimate 10 --mode logdet
 
-## Contribution Notes
-- Keep changes minimal and focused; follow current style.
-- When adding sensors or beacons, update mappings in `current_acoustic_EKF_patched.py` and scenario.
-- Prefer modifying `collect_acoustic_ranges` for messaging/timing improvements rather than duplicating logic.
+## 3) Modem dropout analysis
+Script: modem_dropout_test.py
 
----
-If you want, we can implement the staggered scheduling and pre-ping idle in code to fully suppress the “still transmitting” warning.
+Purpose:
+- Stress the EKF with planned modem outages.
+- Quantify how partial or full acoustic loss affects error and uncertainty.
+
+Key flow:
+- Parse dropout schedule (manual or built-in overlap schedule).
+- Run a single EKF trial via run_single_trial(...).
+- Summarize error, NEES/NIS, uncertainty proxy, and modem uptime.
+
+Outputs:
+- summary.json, timeseries.csv
+- Plots: position error with dropout shading, uncertainty vs time, CDFs, XY trajectory
+
+Run example:
+- python modem_dropout_test.py --duration-sec 900 --use-default-overlaps
+
+## 4) Adaptive modem switching
+Script: modem_switching_validation_fixed.py
+
+Purpose:
+- Validate switching behavior under manual or policy-driven selection.
+- Compare geometry-based, weighted multi-objective, and v2 selectors.
+
+Modes:
+- manual: dropouts mask beacons; active set is the remaining targets.
+- policy: gdop, weighted, or v2 selection with dwell/margin hysteresis.
+
+Policy highlights:
+- GDOP policy: objective = GDOP + size_penalty; feasibility by rank and GDOP thresholds.
+- Weighted policy: combines observability, energy, and mission-target uncertainty into a normalized score.
+- V2 policy: uncertainty + size + rank deficit + energy penalty with SOC-aware scaling.
+
+Outputs:
+- config.json, selector_meta.json, timeseries.csv, summary.json
+- Plots: active_count, active_set, GDOP, score components, SOC, position error
+
+Run examples:
+- Weighted policy: python modem_switching_validation_fixed.py --mode policy --policy-type weighted --traj spiral --duration 120 --seed 0 --make-plots
+- GDOP policy: python modem_switching_validation_fixed.py --mode policy --policy-type gdop --traj lawnmower --duration 90 --seed 1
+
+### AdaptiveModemManagerV2 (detailed working)
+AdaptiveModemManagerV2 is a geometry-and-uncertainty driven selector used by the v2 policy. It does not run the EKF; it consumes the EKF position and covariance and returns a chosen beacon subset plus detailed metrics.
+
+Inputs (per decision):
+- a_pos: AUV position (x,y,z).
+- P: covariance (either full EKF covariance with position in the first 3 states or a 3x3 position covariance).
+- available_ids: list of beacon IDs currently available (dropouts are handled here).
+- depth_available: selects XY or full 3D geometry scoring.
+
+Core steps:
+1) Uncertainty gating:
+	- Compute a scalar uncertainty value from P (trace(P) or sqrt(trace(Ppos))).
+	- If below an off-threshold, acoustics can be gated off (zero-beacon).
+	- If above an on-threshold, acoustics are enabled.
+	- Gate hysteresis is controlled by off_unc_mult/on_unc_mult and gate_min_dwell_steps.
+
+2) Subset enumeration:
+	- Enumerates all subsets between min_subset_size and max_subset_size (including 0 if allowed).
+	- Computes geometry metrics per subset: rank, GDOP, FIM log-det, CRLB std (XY and 3D).
+
+3) Objective scoring (lower is better):
+	- Predict posterior trace using the linearized update:
+	  P+ = P - P H^T (H P H^T + R)^{-1} H P.
+	- Score = trace(P+) + size_penalty * (#beacons) + rank_deficit_penalty * deficit + energy_penalty.
+	- Rank deficit penalizes subsets below rank 2 (XY) or rank 3 (3D).
+	- Energy penalty uses a normalized power model (base + per-beacon draw).
+	- When SOC <= low_power_soc, energy and size penalties increase via low-power multipliers.
+
+4) Switching hysteresis:
+	- If min_dwell_steps has not elapsed, the current subset is held.
+	- Otherwise, a switch occurs only if the best candidate is better than current by switch_margin.
+
+Outputs:
+- Selected IDs plus SelectionMetrics (rank_xy/3d, gdop_xy/3d, fim_logdet_xy/3d, crlb_std, score, reason, soc).
+- Reasons include: battery_depleted, uncertainty_gated_off, dwell_hold, switched, held_margin.
+
+Energy model:
+- Optional; enabled when battery_wh > 0 and energy_weight > 0.
+- SOC is updated every step; if SOC <= soc_min, acoustics are forced off.
+
+Practical configuration notes:
+- target_unc_xy/target_unc_3d with off_unc_mult enable uncertainty-based gating.
+- min_subset_size=0 allows acoustics-off under low uncertainty or low SOC.
+- prefer_smaller breaks ties in favor of smaller subsets.
+- If you want 1-beacon operation under low SOC, reduce rank_deficit_penalty or its low-power multiplier.
+
+## 5) Monte Carlo evaluation
+Script: monte_carlo_runner.py
+
+Purpose:
+- Compare algorithms and selectors across many seeds.
+- Aggregate RMSE, NEES/NIS coverage, energy usage, switching statistics, and CI bands.
+
+Configuration:
+- Uses mc_config.yaml for nearly all parameters.
+- CLI overrides: --outdir, --duration, --runs.
+
+Algorithms:
+- Baselines: imu_dvl_depth, imu_dvl_depth_all4
+- Adaptive: gdop, weighted, v2 (or explicit adaptive_gdop/adaptive_weighted/adaptive_v2)
+
+Outputs:
+- tables/summary_metrics.csv, tables/policy_summary.csv
+- figures/*.png (CDFs, boxplots, CI bands, energy/accuracy tradeoffs, GDOP/FIM)
+- trials/seed_####/... per-run CSV and summary
+
+Run example:
+- python monte_carlo_runner.py --outdir results_mc/spiral_T10_N5 --duration 10 --runs 5
+
+## Core libraries and utilities
+- kalman_utils.py: EKF predict/update and range update helpers.
+- trajectory.py: spiral, lawnmower, concentric, figure8 waypoint generators.
+- uncertainty_utils.py: covariance ellipses/ellipsoids.
+- validation_metrics.py: NEES/NIS calculators and consistency checks.
+- sbl_geometry.py: core FIM/GDOP/CRLB calculations and subset evaluation.
+
+## Typical workflows (end-to-end)
+1) Run the EKF once to validate sensors and noise: current_acoustic_EKF_patched.py
+2) Evaluate geometry sensitivity: fim_gdop_runner.py
+3) Stress outages: modem_dropout_test.py
+4) Validate switching policies: modem_switching_validation_fixed.py
+5) Scale up comparisons: monte_carlo_runner.py with mc_config.yaml
+
+## Notes
+- All plotting uses headless Matplotlib (Agg); outputs are written to results folders.
+- Acoustic targets are named usv1..usv4.
+- Seeds are explicit to keep comparisons reproducible.

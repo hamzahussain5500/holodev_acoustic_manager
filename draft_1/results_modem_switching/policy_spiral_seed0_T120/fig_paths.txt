@@ -1,2 +1,0 @@
-results_modem_switching/policy_spiral_seed0_T120/fig_active_count.png
-results_modem_switching/policy_spiral_seed0_T120/fig_score_vs_time.png
