@@ -58,6 +58,7 @@ This function is the heart of the simulation:
   - NEES/NIS consistency tests
   - Total distance traveled (true/estimated)
 - Optionally returns full time series for Monte Carlo aggregation.
+- Returns a picklable config snapshot (callables stripped) so process-pool Monte Carlo runs work without pickle errors.
 
 ### 5) Plotting utilities
 
@@ -117,6 +118,7 @@ You can pass these via `run_single_trial(..., config_overrides=...)`:
 - Acoustic responses are processed asynchronously in the main loop.
 - Use `return_timeseries=True` for Monte Carlo analysis and plotting.
 - If you use adaptive modem selection, ensure beacons are named consistently (`usv1..usv4`).
+- No `holoocean_uuid` wiring is needed; the environment manages IDs internally.
 
 ## Dependencies
 

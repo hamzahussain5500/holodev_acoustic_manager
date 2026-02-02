@@ -160,7 +160,10 @@ Purpose:
 
 Configuration:
 - Uses mc_config.yaml for nearly all parameters.
-- CLI overrides: --outdir, --duration, --runs.
+- CLI overrides: --outdir, --duration, --runs, --max-workers (process pool size; omit/0 for auto).
+
+Parallelism:
+- Seeds run via a process pool; tune concurrency with --max-workers.
 
 Algorithms:
 - Baselines: imu_dvl_depth, imu_dvl_depth_all4
@@ -172,7 +175,7 @@ Outputs:
 - trials/seed_####/... per-run CSV and summary
 
 Run example:
-- python monte_carlo_runner.py --outdir results_mc/spiral_T10_N5 --duration 10 --runs 5
+- python monte_carlo_runner.py --outdir results_mc/spiral_T10_N5 --duration 10 --runs 5 --max-workers 4
 
 ## Core libraries and utilities
 - kalman_utils.py: EKF predict/update and range update helpers.
