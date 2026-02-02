@@ -7,9 +7,9 @@ This guide explains what happens inside the Monte Carlo runner, how data flows t
 `monte_carlo_runner.py` repeatedly runs the EKF simulation under controlled random seeds and aggregates performance metrics.
 
 **Core loop:**
-1. Load configuration from YAML (`mc_config.yaml`) and apply minimal CLI overrides (`--outdir`, `--duration`, `--runs`).
+1. Load configuration from YAML (`mc_config.yaml`) and apply CLI overrides (`--outdir`, `--duration`, `--runs`, `--max-workers`).
 2. Generate common random streams per seed (initial state perturbations and sensor noise) so all algorithms share the same randomness.
-3. Run each algorithm for every seed, collecting time-series and summary metrics.
+3. Run each algorithm for every seed, collecting time-series and summary metrics. Seeds can run in parallel via a process pool (size controlled by `--max-workers`).
 4. Write per-run outputs (CSV, JSON) and per-experiment plots/tables (CDFs, boxplots, CI bands, energy/accuracy trade-offs).
 5. Print “main findings” with RMSE, NEES/NIS coverage, energy savings, and consistency notes.
 
@@ -76,11 +76,12 @@ These are saved to tables and plotted as CI bands.
 
 ## Configuration workflow (YAML first)
 
-Only three CLI flags remain:
+Only these CLI flags remain (CLI always overrides YAML):
 
 - `--outdir` (output folder)
 - `--duration` (seconds)
 - `--runs` (number of runs)
+- `--max-workers` (process pool size; omit or 0 to auto)
 
 All other settings are loaded from `mc_config.yaml`.
 
@@ -98,6 +99,11 @@ Key settings include:
 ### 1) Basic run (YAML config only)
 ```bash
 /usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_T10_N5 --duration 10 --runs 5
+```
+
+### 1b) Basic run with explicit worker count
+```bash
+/usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_T10_N5 --duration 10 --runs 5 --max-workers 4
 ```
 
 ### 2) Explicit adaptive policies in one run

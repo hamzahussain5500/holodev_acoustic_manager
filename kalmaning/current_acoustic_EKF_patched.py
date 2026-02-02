@@ -1345,6 +1345,9 @@ def run_single_trial(
             nis_results,
         )
 
+    # Drop non-serializable fields (e.g., callable modem_selector_fn) from config for return
+    config_for_log = {k: v for k, v in base_config.items() if not callable(v)}
+
     trial: Dict[str, Any] = {
         "seed": int(seed),
         "runtime_seconds": float(runtime),
@@ -1359,7 +1362,7 @@ def run_single_trial(
         "nees_full_ds_mean": nees_full_ds,
         "nees_pos": nees_pos_test,
         "nis": nis_results,
-        "config": base_config,
+        "config": config_for_log,
     }
 
     if isinstance(random_streams, dict) and ("x0_perturb" in random_streams or "x0" in random_streams):

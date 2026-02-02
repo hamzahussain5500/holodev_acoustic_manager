@@ -15,6 +15,7 @@ import csv
 import json
 import math
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -77,6 +78,7 @@ DEFAULT_MC_CONFIG: Dict[str, Any] = {
     "dvl_extra_std": 0.0,
     "depth_extra_std": 0.0,
     "range_extra_std": 0.0,
+    "max_workers": 2,
     "sigma_r": 0.5,
     "gdop_xy": 15.0,
     "gdop_3d": 15.0,
@@ -928,6 +930,20 @@ def run_trial(algorithm: str, seed: int, args: argparse.Namespace, random_stream
     return trial
 
 
+def _run_trial_worker(payload: Tuple[str, int, Dict[str, Any]]) -> Tuple[str, int, Dict[str, Any]]:
+    """Process-pool safe wrapper to run a single trial.
+
+    payload: (algorithm, seed, args_dict)
+    Returns (algorithm, seed, trial_dict).
+    """
+    algorithm, seed, args_dict = payload
+    args_ns = argparse.Namespace(**args_dict)
+    rs_cfg = RandomStreamsConfig(args_ns.x0_pos_std, args_ns.x0_vel_std)
+    rs = RandomStreams(seed, rs_cfg)
+    trial = run_trial(algorithm, seed, args_ns, rs)
+    return algorithm, seed, trial
+
+
 def compute_energy_metrics(trial: Dict[str, Any], args: argparse.Namespace, algorithm: str) -> float:
     ts = trial.get("timeseries", {}) or {}
     times = np.asarray(ts.get("t", []), dtype=float)
@@ -1420,81 +1436,99 @@ def run_mc_new(args: argparse.Namespace) -> None:
 
     total_runs = len(args.seeds) * len(args.algorithms)
     run_idx = 0
-    for seed_idx, seed in enumerate(args.seeds, start=1):
-        rs_cfg = RandomStreamsConfig(args.x0_pos_std, args.x0_vel_std)
-        rs = RandomStreams(seed, rs_cfg)
+    max_workers = max(1, int(getattr(args, "max_workers", 1)))
+    args_dict = vars(args).copy()
 
-        for algo_idx, algo in enumerate(args.algorithms, start=1):
-            run_idx += 1
-            print(
-                f"[MC] run {run_idx}/{total_runs} | seed {seed_idx}/{len(args.seeds)}={seed} | "
-                f"algo {algo_idx}/{len(args.algorithms)}={algo}"
-            )
-            trial = run_trial(algo, seed, args, rs)
-            if first_trial_with_ts is None and trial.get("timeseries"):
-                first_trial_with_ts = trial
-            ts = trial.get("timeseries", {}) or {}
-            t_series = np.asarray(ts.get("t", []), dtype=float)
-            nees_pos_series = np.asarray(ts.get("nees_pos", []), dtype=float) if ts else None
-            err_series = np.asarray(ts.get("err_norm", []), dtype=float) if ts else None
-            active_count = np.asarray(ts.get("active_count", []), dtype=float)
-            active_set = ts.get("active_set", [])
-            gdop_xy_series = np.asarray(ts.get("gdop_xy", []), dtype=float) if ts else None
-            gdop_3d_series = np.asarray(ts.get("gdop_3d", []), dtype=float) if ts else None
+    def _process_trial(trial: Dict[str, Any], seed_val: int, algo_val: str) -> None:
+        nonlocal first_trial_with_ts
+        ts = trial.get("timeseries", {}) or {}
+        t_series = np.asarray(ts.get("t", []), dtype=float)
+        nees_pos_series = np.asarray(ts.get("nees_pos", []), dtype=float) if ts else None
+        err_series = np.asarray(ts.get("err_norm", []), dtype=float) if ts else None
+        active_count = np.asarray(ts.get("active_count", []), dtype=float)
+        active_set = ts.get("active_set", [])
+        gdop_xy_series = np.asarray(ts.get("gdop_xy", []), dtype=float) if ts else None
+        gdop_3d_series = np.asarray(ts.get("gdop_3d", []), dtype=float) if ts else None
 
-            nis_ac_series = None
-            nis_ac_dof = None
-            if ts and ts.get("nis_logs") and ts["nis_logs"].get("acoustic"):
-                log = ts["nis_logs"]["acoustic"]
-                if log.get("values"):
-                    nis_ac_dof = log.get("dof", None)
-                    nis_ac_series = fill_sparse_series(t_series, log)
+        nis_ac_series = None
+        nis_ac_dof = None
+        if ts and ts.get("nis_logs") and ts["nis_logs"].get("acoustic"):
+            log = ts["nis_logs"]["acoustic"]
+            if log.get("values"):
+                nis_ac_dof = log.get("dof", None)
+                nis_ac_series = fill_sparse_series(t_series, log)
 
-            energy_wh = compute_energy_metrics(trial, args, algo)
+        energy_wh = compute_energy_metrics(trial, args, algo_val)
 
-            pct = _percent_time_by_active_count(active_count)
-            switch_count = _count_switches(active_set if isinstance(active_set, list) else list(active_set))
-            avg_beacons = compute_avg_beacons(active_count) if active_count.size else np.nan
-            nees_pct = float(trial.get("nees_full", {}).get("percent_inside_bounds", np.nan))
-            nis_ac_pct = float((trial.get("nis", {}).get("acoustic") or {}).get("percent_inside_bounds", np.nan))
-            crlb_eff = compute_crlb_efficiency(trial)
+        pct = _percent_time_by_active_count(active_count)
+        switch_count = _count_switches(active_set if isinstance(active_set, list) else list(active_set))
+        avg_beacons = compute_avg_beacons(active_count) if active_count.size else np.nan
+        nees_pct = float(trial.get("nees_full", {}).get("percent_inside_bounds", np.nan))
+        nis_ac_pct = float((trial.get("nis", {}).get("acoustic") or {}).get("percent_inside_bounds", np.nan))
+        crlb_eff = compute_crlb_efficiency(trial)
 
-            row = {
-                "seed": seed,
-                "algorithm": algo,
-                "pos_rmse": float(trial.get("pos_rmse_total", np.nan)),
-                "final_error": float(trial.get("final_position_error", np.nan)),
-                "energy_Wh": float(energy_wh),
-                "switch_count": float(switch_count),
-                "avg_beacons": float(avg_beacons),
-                "nees_pct": float(nees_pct),
-                "nis_acoustic_pct": float(nis_ac_pct),
-                "crlb_eff": float(crlb_eff),
-                **{f"pct_active_{k}": pct[k] for k in range(5)},
-            }
-            per_run_rows.append(row)
+        row = {
+            "seed": seed_val,
+            "algorithm": algo_val,
+            "pos_rmse": float(trial.get("pos_rmse_total", np.nan)),
+            "final_error": float(trial.get("final_position_error", np.nan)),
+            "energy_Wh": float(energy_wh),
+            "switch_count": float(switch_count),
+            "avg_beacons": float(avg_beacons),
+            "nees_pct": float(nees_pct),
+            "nis_acoustic_pct": float(nis_ac_pct),
+            "crlb_eff": float(crlb_eff),
+            **{f"pct_active_{k}": pct[k] for k in range(5)},
+        }
+        per_run_rows.append(row)
 
-            results_by_algo[algo].append({
-                **row,
-                "t_series": t_series,
-                "nees_pos_series": nees_pos_series,
-                "err_series": err_series,
-                "nis_ac_series": nis_ac_series,
-                "nis_ac_dof": nis_ac_dof,
-                "active_count": active_count,
-                "gdop_xy_series": gdop_xy_series,
-                "gdop_3d_series": gdop_3d_series,
-                "selector_meta": trial.get("selector_meta", []),
-            })
+        results_by_algo[algo_val].append({
+            **row,
+            "t_series": t_series,
+            "nees_pos_series": nees_pos_series,
+            "err_series": err_series,
+            "nis_ac_series": nis_ac_series,
+            "nis_ac_dof": nis_ac_dof,
+            "active_count": active_count,
+            "gdop_xy_series": gdop_xy_series,
+            "gdop_3d_series": gdop_3d_series,
+            "selector_meta": trial.get("selector_meta", []),
+        })
 
-            seed_dir = out_root / "trials" / f"seed_{seed:04d}" / algo
-            seed_dir.mkdir(parents=True, exist_ok=True)
-            with (seed_dir / "trial_summary.json").open("w") as f:
-                json.dump({"seed": seed, **row}, f, indent=2)
-            write_timeseries_csv(trial, seed_dir / "timeseries.csv")
-            if "selector_meta" in trial:
-                with (seed_dir / "selector_meta.json").open("w") as f:
-                    json.dump(trial["selector_meta"], f, indent=2)
+        seed_dir = out_root / "trials" / f"seed_{seed_val:04d}" / algo_val
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        with (seed_dir / "trial_summary.json").open("w") as f:
+            json.dump({"seed": seed_val, **row}, f, indent=2)
+        write_timeseries_csv(trial, seed_dir / "timeseries.csv")
+        if "selector_meta" in trial:
+            with (seed_dir / "selector_meta.json").open("w") as f:
+                json.dump(trial["selector_meta"], f, indent=2)
+
+        if first_trial_with_ts is None and trial.get("timeseries"):
+            first_trial_with_ts = trial
+
+    if max_workers <= 1:
+        for seed_idx, seed in enumerate(args.seeds, start=1):
+            rs_cfg = RandomStreamsConfig(args.x0_pos_std, args.x0_vel_std)
+            rs = RandomStreams(seed, rs_cfg)
+
+            for algo_idx, algo in enumerate(args.algorithms, start=1):
+                run_idx += 1
+                print(
+                    f"[MC] run {run_idx}/{total_runs} | seed {seed_idx}/{len(args.seeds)}={seed} | "
+                    f"algo {algo_idx}/{len(args.algorithms)}={algo}"
+                )
+                trial = run_trial(algo, seed, args, rs)
+                _process_trial(trial, seed, algo)
+    else:
+        print(f"[MC] parallel mode: max_workers={max_workers}, total_runs={total_runs}")
+        payloads = [(algo, seed, args_dict) for seed in args.seeds for algo in args.algorithms]
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {pool.submit(_run_trial_worker, payload): payload for payload in payloads}
+            for idx, fut in enumerate(as_completed(future_map), start=1):
+                algo_val, seed_val, trial = fut.result()
+                print(f"[MC] completed {idx}/{total_runs} | seed={seed_val} | algo={algo_val}")
+                _process_trial(trial, seed_val, algo_val)
 
     write_per_run_metrics(per_run_rows, out_root / "tables")
 
@@ -1750,6 +1784,9 @@ def parse_args() -> argparse.Namespace:
                         help="(legacy) Trajectory to use")
     parser.add_argument("--legacy", action="store_true", help="Use legacy two-config runner")
 
+    # Parallel control
+    parser.add_argument("--max-workers", type=int, default=None, help="Process pool workers for MC runs (default from YAML or 1)")
+
     return parser.parse_args()
 
 
@@ -1777,7 +1814,9 @@ if __name__ == "__main__":
         merged = dict(DEFAULT_MC_CONFIG)
         merged.update(cfg_data)
         for key, value in merged.items():
-            setattr(args, key, value)
+            # Respect CLI overrides when provided (e.g., max_workers)
+            if not hasattr(args, key) or getattr(args, key) is None:
+                setattr(args, key, value)
 
         if args.outdir is None:
             args.outdir = cfg_data.get("outdir", "results_monte_carlo/spiral_T180_N20")
