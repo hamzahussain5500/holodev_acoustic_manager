@@ -14,6 +14,7 @@ This script runs a single HoloOcean EKF simulation that fuses IMU, DVL, depth, a
   - Only one request in flight at a time.
   - Sends a request every `period_ticks` if modems are idle.
   - Polls sensor messages for `MSG_RESPX` replies.
+  - Tracks request/response timing (`request_tick`, `response_tick`, `latency_ticks`).
   - Avoids calling `env.tick()` inside the scheduler (keeps simulation time consistent).
 
 ### 3) Core EKF run: `run_ekf_acoustics(...)`
@@ -30,14 +31,19 @@ This function is the heart of the simulation:
 
 - **Builds trajectory waypoints** using `trajectory.py` (`spiral`, `lawnmower`, `concentric`, `figure8`).
 
-- **Main loop (one EKF step = one env.step)**
+- **Main loop (one EKF heartbeat = one env.step)**
   1. Send a 6‑DOF target waypoint to the vehicle.
   2. Read IMU, DVL, depth, pose, and location sensors.
-  3. Perform the **EKF predict** step using IMU acceleration.
-  4. Conditionally update with:
-     - DVL velocity
-     - Depth measurement
-     - Acoustic ranges (when responses arrive)
+  3. Compute dynamic `dt_step` from simulation time and set `ekf.dt = dt_step`.
+  4. Perform the **EKF predict** step using IMU acceleration.
+  5. Asynchronous, multi-rate updates using per-sensor due scheduling:
+    - DVL velocity update when DVL is due
+    - Depth update when depth is due
+    - Acoustic updates when responses arrive
+  6. Acoustic latency handling:
+    - `acoustic_latency_policy="skip"` drops delayed responses above threshold
+    - `acoustic_latency_policy="apply_current"` applies on current state (no rewind)
+    - `acoustic_latency_policy="rewind"` applies delayed acoustic via fixed-lag rewind/replay
   5. Log NEES/NIS and time‑series state.
   6. Handle waypoint switching when the AUV reaches a waypoint.
 
@@ -107,15 +113,22 @@ You can pass these via `run_single_trial(..., config_overrides=...)`:
 - `enable_dvl`, `enable_depth`, `enable_acoustic`
 - `use_all_acoustic`: enable all beacons
 - `modem_selector_fn`: adaptive selector callback
-- `acoustic_period_ticks`: acoustic request rate
+- `acoustic_period_ticks`: acoustic request rate (total across round-robin targets)
 - `dvl_measurement_std`, `depth_measurement_std`, `acoustic_measurement_std`
 - `imu_accel_extra_std`, `imu_bias_rw_std`, `dvl_extra_std`, `depth_extra_std`, `range_extra_std`
 - `q_pos_std`, `q_vel_std`, `p_pos_std_init`, `p_vel_std_init`
+- `ekf_mode`: `"asynchronous"` (documentary mode flag)
+- `acoustic_latency_policy`: `"skip"`, `"apply_current"`, or `"rewind"`
+- `acoustic_latency_max_sec`: max accepted acoustic age before skip (when policy is `skip`)
+- `acoustic_rewind_buffer_sec`: fixed-lag history length used by rewind/replay
 
 ## Notes and tips
 
-- The EKF uses **one `env.step()` per iteration** for time consistency.
+- The EKF uses **one `env.step()` per heartbeat** with dynamic `dt` for time consistency.
+- DVL/depth are applied asynchronously via due-tick scheduling (multi-rate behavior).
 - Acoustic responses are processed asynchronously in the main loop.
+- Delayed acoustic rewind/replay is implemented as a fixed-lag buffer over recent ticks.
+- If delayed data is older than the retained buffer window, the implementation falls back to current-state update behavior.
 - Use `return_timeseries=True` for Monte Carlo analysis and plotting.
 - If you use adaptive modem selection, ensure beacons are named consistently (`usv1..usv4`).
 - No `holoocean_uuid` wiring is needed; the environment manages IDs internally.
