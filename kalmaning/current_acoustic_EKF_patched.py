@@ -53,24 +53,25 @@ SIM_DURATION_SEC = 300
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
 
 # EKF process noise (Q
-Q_POS_STD = 0.0
-Q_VEL_STD = 0.085
+Q_POS_STD = 0.10
+Q_VEL_STD = 0.22
+#Q_VEL_STD = 0.1
 
 # EKF initial covariance (P)
 P_POS_STD_INIT = 1.0
 P_VEL_STD_INIT = 1.0
 
 # DVL measurement noise (R)
-DVL_VEL_STD = 0.24
+DVL_VEL_STD = 0.45
 
 # Depth measurement noise (R_depth)
 DEPTH_STD = 0.03
 
 # Acoustic range noise (R_range)
-ACOUSTIC_RANGE_STD = 0.1
+ACOUSTIC_RANGE_STD = 0.03
 
 # Acoustic ping interval (in ticks)
-ACOUSTIC_UPDATE_PERIOD_TICKS = 100  # ~1 second if ticks_per_sec=100
+ACOUSTIC_UPDATE_PERIOD_TICKS = 30  # total ping period across RR targets
 
 # ===== Currents control =====
 USE_CURRENTS = False
@@ -255,7 +256,7 @@ class AcousticRoundRobin:
         """Poll AUV AcousticBeaconSensor once (non-blocking).
 
         Returns:
-          list of (from_id, range_m, depth_m) for any MSG_RESPX received this tick.
+          list of dicts for any MSG_RESPX received this tick.
         """
         results = []
 
@@ -276,7 +277,18 @@ class AcousticRoundRobin:
                 # ["MSG_RESPX", from_sensor, payload, phi, theta, r, d]
                 dist = float(msg[5])
                 depth = float(msg[6])
-                results.append((from_id, dist, depth))
+                request_tick = None
+                if self.pending is not None and from_id == int(self.pending["target_id"]):
+                    request_tick = int(self.pending["send_tick"])
+                latency_ticks = int(sim_tick - request_tick) if request_tick is not None else None
+                results.append({
+                    "from_id": from_id,
+                    "range_m": dist,
+                    "depth_m": depth,
+                    "response_tick": int(sim_tick),
+                    "request_tick": request_tick,
+                    "latency_ticks": latency_ticks,
+                })
 
                 if verbose:
                     print(f"[ACOUSTIC] Got MSG_RESPX from {from_id} at tick={sim_tick}: r={dist:.2f} m, d={depth:.2f} m")
@@ -439,10 +451,12 @@ def run_ekf_acoustics(
 ):
     """Run one EKF fusion with IMU + DVL + Depth + Acoustic ranges (multi-target ready).
 
-    Key properties of this implementation:
-      - Exactly ONE env.tick() per EKF iteration (no hidden ticks inside acoustic logic).
-      - Acoustic ranging handled asynchronously via AcousticRoundRobin state machine.
-      - Supports fusing multiple ranges (sequential updates) as they arrive.
+        Key properties of this implementation:
+            - Exactly ONE env.step() per outer simulation tick.
+            - Dynamic dt prediction (timestamp-based) each tick.
+            - Asynchronous multi-rate updates via per-sensor next-event scheduling.
+            - Acoustic ranging handled asynchronously via AcousticRoundRobin state machine.
+            - Optional latency-aware acoustic handling (skip/apply current state).
     """
     cfg = {
         "use_currents": False,
@@ -484,6 +498,10 @@ def run_ekf_acoustics(
         "figure8_points_per_turn": 300,
         "duration_sec": SIM_DURATION_SEC,
         "modem_selector_fn": None,
+        "ekf_mode": "asynchronous",
+        "acoustic_latency_policy": "skip",  # skip | apply_current | rewind
+        "acoustic_latency_max_sec": 1.0,
+        "acoustic_rewind_buffer_sec": 10.0,
     }
     if sim_config:
         cfg.update(sim_config)
@@ -685,11 +703,126 @@ def run_ekf_acoustics(
                     return None
                 return row[:size]
             return None
+
+        max_history_ticks = max(1, int(float(cfg.get("acoustic_rewind_buffer_sec", 10.0)) * ticks_per_sec))
+        history_by_tick: Dict[int, Dict[str, Any]] = {}
+        history_tick_order: List[int] = []
+
+        def _put_tick_history(record: Dict[str, Any]) -> None:
+            t = int(record["tick"])
+            history_by_tick[t] = record
+            history_tick_order.append(t)
+            while len(history_tick_order) > max_history_ticks:
+                old = history_tick_order.pop(0)
+                history_by_tick.pop(old, None)
+
+        def _replay_from_oosm(
+            obs_tick: int,
+            z_range: float,
+            beacon_pos: np.ndarray,
+            r_var: float,
+            current_tick: int,
+            current_dt_step: float,
+            current_a_world: np.ndarray,
+            current_dvl_update: Optional[Dict[str, Any]],
+            current_depth_update: Optional[Dict[str, Any]],
+            current_acoustic_updates: List[Dict[str, Any]],
+        ) -> bool:
+            """Rewind to obs tick, insert delayed acoustic update, replay to current tick."""
+            rec_obs = history_by_tick.get(int(obs_tick))
+            if rec_obs is None:
+                return False
+            if "pre_acoustic_x" not in rec_obs or "pre_acoustic_P" not in rec_obs:
+                return False
+
+            # 1) Rewind to observation tick, pre-acoustic point
+            ekf.x = np.asarray(rec_obs["pre_acoustic_x"]).copy()
+            ekf.P = np.asarray(rec_obs["pre_acoustic_P"]).copy()
+
+            # Re-apply acoustics that were originally fused on obs tick
+            for upd in rec_obs.get("acoustic_updates", []):
+                ekf.update_range(
+                    float(upd["z_range"]),
+                    np.asarray(upd["beacon_pos"], dtype=float),
+                    float(upd["r_var"]),
+                )
+
+            # Insert delayed OOSM acoustic update at correct time
+            ekf.update_range(float(z_range), np.asarray(beacon_pos, dtype=float), float(r_var))
+
+            # Persist this inserted update in history (for future replays)
+            rec_obs.setdefault("acoustic_updates", []).append(
+                {
+                    "z_range": float(z_range),
+                    "beacon_pos": np.asarray(beacon_pos, dtype=float).copy(),
+                    "r_var": float(r_var),
+                }
+            )
+
+            # 2) Replay forward to current time
+            for t in range(int(obs_tick) + 1, int(current_tick) + 1):
+                if t == int(current_tick):
+                    ekf.dt = float(current_dt_step)
+                    ekf.predict(np.asarray(current_a_world, dtype=float))
+
+                    if current_dvl_update is not None:
+                        ekf.update_linear(
+                            np.asarray(current_dvl_update["z"], dtype=float),
+                            np.asarray(current_dvl_update["H"], dtype=float),
+                            np.asarray(current_dvl_update["R"], dtype=float),
+                        )
+                    if current_depth_update is not None:
+                        ekf.update_linear(
+                            np.asarray(current_depth_update["z"], dtype=float),
+                            np.asarray(current_depth_update["H"], dtype=float),
+                            np.asarray(current_depth_update["R"], dtype=float),
+                        )
+
+                    for upd in current_acoustic_updates:
+                        ekf.update_range(
+                            float(upd["z_range"]),
+                            np.asarray(upd["beacon_pos"], dtype=float),
+                            float(upd["r_var"]),
+                        )
+                else:
+                    rec = history_by_tick.get(t)
+                    if rec is None:
+                        return False
+                    ekf.dt = float(rec["dt_step"])
+                    ekf.predict(np.asarray(rec["a_world"], dtype=float))
+
+                    dvl_upd = rec.get("dvl_update", None)
+                    if dvl_upd is not None:
+                        ekf.update_linear(
+                            np.asarray(dvl_upd["z"], dtype=float),
+                            np.asarray(dvl_upd["H"], dtype=float),
+                            np.asarray(dvl_upd["R"], dtype=float),
+                        )
+
+                    depth_upd = rec.get("depth_update", None)
+                    if depth_upd is not None:
+                        ekf.update_linear(
+                            np.asarray(depth_upd["z"], dtype=float),
+                            np.asarray(depth_upd["H"], dtype=float),
+                            np.asarray(depth_upd["R"], dtype=float),
+                        )
+
+                    for upd in rec.get("acoustic_updates", []):
+                        ekf.update_range(
+                            float(upd["z_range"]),
+                            np.asarray(upd["beacon_pos"], dtype=float),
+                            float(upd["r_var"]),
+                        )
+            return True
+
         prev_true_pos = None
+        last_time = None
         clock = 0
         sim_tick = 0  # counts env.step() calls (true simulation time base)
         idx = 0
         yaw_cmd = TARGET_YAW_DEG
+        next_dvl_tick = int(dvl_period_ticks) if dvl_period_ticks is not None else 1
+        next_depth_tick = int(depth_period_ticks) if depth_period_ticks is not None else 1
 
         # Build waypoints from selected trajectory
         waypoint_spacing = cfg.get("waypoint_spacing", 12.5)
@@ -713,11 +846,6 @@ def run_ekf_acoustics(
             z_draw = wp[2] if has_z_in_waypoints else TARGET_Z
             env.draw_point([wp[0], wp[1], z_draw], color=[0, 255, 0], thickness=20.0, lifetime=0)
 
-
-        last_dvl = None
-        last_depth = None
-
-
         for k in range(n_steps):
             if debug_steps:
                 print(f"--- EKF step {k+1}/{n_steps} (sim_tick={sim_tick}) (duration={k/ticks_per_sec}) ---")
@@ -733,6 +861,14 @@ def run_ekf_acoustics(
             state = env.step(target_6d)
             sim_tick += 1
             t_current = sim_tick * dt
+
+            # Dynamic dt from timestamps (asynchronous-style EKF heartbeat).
+            if last_time is None:
+                dt_step = dt
+            else:
+                dt_step = max(1e-6, float(t_current - last_time))
+            last_time = float(t_current)
+            ekf.dt = dt_step
 
             # Apply currents (optional)
             apply_currents(env, state, clock, enabled=cfg.get("use_currents", USE_CURRENTS))
@@ -793,8 +929,12 @@ def run_ekf_acoustics(
 
             ekf.predict(a_world)
 
+            dvl_replay_update = None
+            depth_replay_update = None
+
             # --- DVL update (velocity) ---
-            if use_dvl_update and (dvl_period_ticks is None or (sim_tick % dvl_period_ticks) == 0):
+            dvl_due = dvl_period_ticks is None or sim_tick >= next_dvl_tick
+            if use_dvl_update and dvl_due:
                 prior_x = ekf.x.copy()
                 prior_P = ekf.P.copy()
                 v_body = dvl[0:3]
@@ -808,31 +948,37 @@ def run_ekf_acoustics(
                     elif local_rng is not None:
                         v_world_meas = v_world_meas + local_rng.normal(0.0, cfg["dvl_extra_std"], size=3)
 
-                # Only update if this is actually a new measurement (not held/repeated)
-                if last_dvl is None or not np.allclose(v_world_meas, last_dvl, atol=1e-3):
-                    H_dvl = np.array([
-                        [0, 0, 0, 1, 0, 0],
-                        [0, 0, 0, 0, 1, 0],
-                        [0, 0, 0, 0, 0, 1],
-                    ])
-                    R_dvl = np.diag([cfg.get("dvl_measurement_std", DVL_VEL_STD)**2]*3)
+                H_dvl = np.array([
+                    [0, 0, 0, 1, 0, 0],
+                    [0, 0, 0, 0, 1, 0],
+                    [0, 0, 0, 0, 0, 1],
+                ])
+                R_dvl = np.diag([cfg.get("dvl_measurement_std", DVL_VEL_STD)**2]*3)
 
-                    y_dvl = v_world_meas.reshape(3, 1) - H_dvl @ prior_x.reshape(6, 1)
-                    S_dvl = H_dvl @ prior_P @ H_dvl.T + R_dvl
-                    try:
-                        nis_val = float(y_dvl.T @ np.linalg.solve(S_dvl, y_dvl))
-                    except np.linalg.LinAlgError:
-                        nis_val = float(y_dvl.T @ np.linalg.pinv(S_dvl) @ y_dvl)
-                    nis_logs["dvl"]["t"].append(t_current)
-                    nis_logs["dvl"]["values"].append(nis_val)
+                y_dvl = v_world_meas.reshape(3, 1) - H_dvl @ prior_x.reshape(6, 1)
+                S_dvl = H_dvl @ prior_P @ H_dvl.T + R_dvl
+                try:
+                    nis_val = float(y_dvl.T @ np.linalg.solve(S_dvl, y_dvl))
+                except np.linalg.LinAlgError:
+                    nis_val = float(y_dvl.T @ np.linalg.pinv(S_dvl) @ y_dvl)
+                nis_logs["dvl"]["t"].append(t_current)
+                nis_logs["dvl"]["values"].append(nis_val)
 
-                    ekf.update_linear(v_world_meas, H_dvl, R_dvl)
-                    last_dvl = v_world_meas.copy()
+                ekf.update_linear(v_world_meas, H_dvl, R_dvl)
+                dvl_replay_update = {
+                    "z": np.asarray(v_world_meas, dtype=float).copy(),
+                    "H": H_dvl.copy(),
+                    "R": R_dvl.copy(),
+                }
+                if dvl_period_ticks is not None:
+                    while next_dvl_tick <= sim_tick:
+                        next_dvl_tick += int(dvl_period_ticks)
 
 
 
             # --- Depth update (z) ---
-            if use_depth_update and (depth_period_ticks is None or (sim_tick % depth_period_ticks) == 0):
+            depth_due = depth_period_ticks is None or sim_tick >= next_depth_tick
+            if use_depth_update and depth_due:
                 prior_x = ekf.x.copy()
                 prior_P = ekf.P.copy()
                 z_meas = float(depth[0])
@@ -843,27 +989,36 @@ def run_ekf_acoustics(
                     elif local_rng is not None:
                         z_meas = z_meas + float(local_rng.normal(0.0, cfg["depth_extra_std"]))
 
-                # Only update if new (depth often holds last value between true updates)
-                if last_depth is None or abs(z_meas - last_depth) > 1e-3:
-                    z_vec = np.array([z_meas])
-                    H_depth = np.array([[0, 0, 1, 0, 0, 0]])
-                    R_depth = np.array([[cfg.get("depth_measurement_std", DEPTH_STD)**2]])
+                z_vec = np.array([z_meas])
+                H_depth = np.array([[0, 0, 1, 0, 0, 0]])
+                R_depth = np.array([[cfg.get("depth_measurement_std", DEPTH_STD)**2]])
 
-                    y_depth = z_vec.reshape(1, 1) - H_depth @ prior_x.reshape(6, 1)
-                    S_depth = H_depth @ prior_P @ H_depth.T + R_depth
-                    try:
-                        nis_val = float(y_depth.T @ np.linalg.solve(S_depth, y_depth))
-                    except np.linalg.LinAlgError:
-                        nis_val = float(y_depth.T @ np.linalg.pinv(S_depth) @ y_depth)
-                    nis_logs["depth"]["t"].append(t_current)
-                    nis_logs["depth"]["values"].append(nis_val)
+                y_depth = z_vec.reshape(1, 1) - H_depth @ prior_x.reshape(6, 1)
+                S_depth = H_depth @ prior_P @ H_depth.T + R_depth
+                try:
+                    nis_val = float(y_depth.T @ np.linalg.solve(S_depth, y_depth))
+                except np.linalg.LinAlgError:
+                    nis_val = float(y_depth.T @ np.linalg.pinv(S_depth) @ y_depth)
+                nis_logs["depth"]["t"].append(t_current)
+                nis_logs["depth"]["values"].append(nis_val)
 
-                    ekf.update_linear(z_vec, H_depth, R_depth)
-                    last_depth = z_meas
+                ekf.update_linear(z_vec, H_depth, R_depth)
+                depth_replay_update = {
+                    "z": np.asarray(z_vec, dtype=float).copy(),
+                    "H": H_depth.copy(),
+                    "R": R_depth.copy(),
+                }
+                if depth_period_ticks is not None:
+                    while next_depth_tick <= sim_tick:
+                        next_depth_tick += int(depth_period_ticks)
 
 
 
             # --- Acoustic scheduling + polling (non-blocking) ---
+            pre_acoustic_x = ekf.x.copy()
+            pre_acoustic_P = ekf.P.copy()
+            acoustic_updates_current_tick: List[Dict[str, Any]] = []
+
             selector_fn = cfg.get("modem_selector_fn", None)
             active_names = [id_to_agent.get(uid, None) for uid in selected_usv_ids]
             active_names = [n for n in active_names if n is not None]
@@ -944,8 +1099,22 @@ def run_ekf_acoustics(
                 responses = acoustic_mgr.poll(state, sim_tick, auv_name=AUV_NAME, verbose=verbose)
 
                 # Fuse ALL ranges received on this tick (sequential EKF updates)
-                for from_id, dist_m, depth_m in responses:
+                latency_policy = str(cfg.get("acoustic_latency_policy", "skip"))
+                max_lat_sec = float(cfg.get("acoustic_latency_max_sec", 1.0))
+
+                for resp in responses:
+                    from_id = int(resp.get("from_id"))
+                    dist_m = float(resp.get("range_m"))
+                    latency_ticks = resp.get("latency_ticks", None)
+                    obs_tick = int(resp.get("request_tick") if resp.get("request_tick") is not None else sim_tick)
+                    latency_sec = (float(latency_ticks) / float(ticks_per_sec)) if latency_ticks is not None else 0.0
+
                     if from_id not in selected_usv_ids:
+                        continue
+
+                    if latency_ticks is not None and latency_sec > max_lat_sec and latency_policy == "skip":
+                        if verbose:
+                            print(f"[ACOUSTIC] Skip delayed sample from {from_id}: latency={latency_sec:.2f}s > {max_lat_sec:.2f}s")
                         continue
 
                     usv_name = id_to_agent.get(from_id, None)
@@ -1006,7 +1175,36 @@ def run_ekf_acoustics(
                     nis_logs["acoustic"]["t"].append(t_current)
                     nis_logs["acoustic"]["values"].append(nis_val)
 
-                    ekf.update_range(dist_m_noisy, beacon_pos, cfg.get("acoustic_measurement_std", ACOUSTIC_RANGE_STD)**2)
+                    r_var = float(cfg.get("acoustic_measurement_std", ACOUSTIC_RANGE_STD)**2)
+                    is_delayed = obs_tick < sim_tick
+
+                    if is_delayed and latency_policy == "rewind":
+                        applied = _replay_from_oosm(
+                            obs_tick=obs_tick,
+                            z_range=float(dist_m_noisy),
+                            beacon_pos=np.asarray(beacon_pos, dtype=float),
+                            r_var=r_var,
+                            current_tick=sim_tick,
+                            current_dt_step=float(dt_step),
+                            current_a_world=np.asarray(a_world, dtype=float),
+                            current_dvl_update=dvl_replay_update,
+                            current_depth_update=depth_replay_update,
+                            current_acoustic_updates=acoustic_updates_current_tick,
+                        )
+                        if applied:
+                            continue
+                        # fallback if rewind not possible (e.g., outside buffer)
+                        if verbose:
+                            print(f"[ACOUSTIC] Rewind unavailable for obs_tick={obs_tick}; applying current-state update")
+
+                    ekf.update_range(dist_m_noisy, beacon_pos, r_var)
+                    acoustic_updates_current_tick.append(
+                        {
+                            "z_range": float(dist_m_noisy),
+                            "beacon_pos": np.asarray(beacon_pos, dtype=float).copy(),
+                            "r_var": r_var,
+                        }
+                    )
 
             active_counts.append(len(active_set))
             active_sets.append("|".join(sorted(active_set)) if active_set else "")
@@ -1015,6 +1213,26 @@ def run_ekf_acoustics(
             rank_3d_series.append(rank_3d_sel)
             gdop_3d_series.append(gdop_3d_sel)
             mode_series.append(mode_sel)
+
+            _put_tick_history(
+                {
+                    "tick": int(sim_tick),
+                    "dt_step": float(dt_step),
+                    "a_world": np.asarray(a_world, dtype=float).copy(),
+                    "dvl_update": dvl_replay_update,
+                    "depth_update": depth_replay_update,
+                    "pre_acoustic_x": pre_acoustic_x.copy(),
+                    "pre_acoustic_P": pre_acoustic_P.copy(),
+                    "acoustic_updates": [
+                        {
+                            "z_range": float(u["z_range"]),
+                            "beacon_pos": np.asarray(u["beacon_pos"], dtype=float).copy(),
+                            "r_var": float(u["r_var"]),
+                        }
+                        for u in acoustic_updates_current_tick
+                    ],
+                }
+            )
 
             # --- Heading control: face currents or waypoint ---
             # Hold yaw fixed at 60 degrees (TARGET_YAW_DEG)

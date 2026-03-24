@@ -28,8 +28,11 @@ Purpose:
 - Support adaptive modem selection via a selector function.
 
 Key flow:
-- Initialize HoloOcean, build waypoints from trajectory.py, and run one predict/update cycle per env.step.
+- Initialize HoloOcean, build waypoints from trajectory.py, and run one EKF heartbeat per env.step.
+- Dynamic `dt` is computed each heartbeat and used in prediction (`ekf.dt = dt_step`).
+- DVL/depth updates are asynchronous multi-rate updates via per-sensor due scheduling.
 - Asynchronous acoustic scheduling: one request in flight, responses processed in the main loop.
+- Acoustic latency policy is configurable (`skip`, `apply_current`, `rewind`) with max-age and fixed-lag buffer controls.
 - Optional selector_fn chooses which beacons are active at each tick.
 
 Outputs:
