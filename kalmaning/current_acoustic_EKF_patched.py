@@ -22,7 +22,7 @@ from validation_metrics import (
 # Sensor rates (Hz) - must match your scenario JSON
 IMU_HZ   = 100   # same as ticks_per_sec
 DVL_HZ   = 20
-DEPTH_HZ = 50
+DEPTH_HZ = 100   # DepthSensor has no Hz field in JSON -> defaults to ticks_per_sec (100 Hz)
 
 
 # EKF fusion script: IMU + DVL + Depth + Acoustic range (optional range logging).
@@ -52,23 +52,41 @@ SIM_DURATION_SEC = 300
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
 
-# EKF process noise (Q
-Q_POS_STD = 0.10
-Q_VEL_STD = 0.22
-#Q_VEL_STD = 0.1
+# EKF process noise (Q)
+# Q_POS_STD: position random-walk spectral density (m/sqrt(s)).
+#   Set to 0.0 to rely purely on the IMU-driven Q = B*Qa*B^T.
+#   A non-zero value adds redundant position drift on top and inflates P unnecessarily.
+Q_POS_STD = 0.0
+# Q_VEL_STD: unmodelled acceleration std (m/s^2).
+#   Represents vehicle manoeuvre uncertainty (NOT IMU noise floor).
+#   Empirical: debiased IMU std ~0.005 m/s^2; BlueROV2 manoeuvre uncertainty ~0.3 m/s^2.
+#   Validated: Q=0.3 gives NEES_3D~1.0 for DVL+Depth alone; acoustic updates
+#   cause residual NEES inflation due to the degenerate beacon geometry (all 4 USVs
+#   clustered within 18m at ~450m range -> near-rank-1 FIM in lateral direction).
+Q_VEL_STD = 0.3
 
 # EKF initial covariance (P)
 P_POS_STD_INIT = 1.0
 P_VEL_STD_INIT = 1.0
 
 # DVL measurement noise (R)
-DVL_VEL_STD = 0.45
+# Empirically measured: DVL world-frame per-axis noise ~0.44 m/s (XY), ~0.13 m/s (Z).
+# XY and Z are anisotropic; using per-axis values in R_dvl for correct weighting.
+DVL_VEL_STD    = 0.45   # XY axes (isotropic fallback; used if per-axis not set)
+DVL_VEL_STD_Z  = 0.13   # Z axis empirically ~3x better than XY
 
 # Depth measurement noise (R_depth)
+# Empirically confirmed: depth std ~0.030 m, matching JSON Sigma=0.03.
 DEPTH_STD = 0.03
 
 # Acoustic range noise (R_range)
-ACOUSTIC_RANGE_STD = 0.03
+# Empirically measured: HoloOcean AcousticBeaconSensor returns near-perfect ranges
+# (std ~0.0001 m) regardless of DistanceSigma in the JSON.
+# However, the 4 USV beacons form an 18m cluster at ~450m from the AUV, giving a
+# near-rank-1 FIM (poor lateral observability). Using a conservative R = 0.30 m
+# prevents the filter from collapsing P in directions it cannot actually observe,
+# validated empirically: gives NEES_3D ~ 3.0 (consistent) across multiple seeds.
+ACOUSTIC_RANGE_STD = 0.30
 
 # Acoustic ping interval (in ticks)
 ACOUSTIC_UPDATE_PERIOD_TICKS = 30  # total ping period across RR targets
@@ -468,6 +486,7 @@ def run_ekf_acoustics(
         "acoustic_uncertainty_trace_thresh": None,
         "acoustic_period_ticks": ACOUSTIC_UPDATE_PERIOD_TICKS,
         "dvl_measurement_std": DVL_VEL_STD,
+        "dvl_measurement_std_z": DVL_VEL_STD_Z,
         "depth_measurement_std": DEPTH_STD,
         "acoustic_measurement_std": ACOUSTIC_RANGE_STD,
         "dvl_extra_std": 0.0,
@@ -953,7 +972,9 @@ def run_ekf_acoustics(
                     [0, 0, 0, 0, 1, 0],
                     [0, 0, 0, 0, 0, 1],
                 ])
-                R_dvl = np.diag([cfg.get("dvl_measurement_std", DVL_VEL_STD)**2]*3)
+                _dvl_xy = cfg.get("dvl_measurement_std", DVL_VEL_STD)
+                _dvl_z  = cfg.get("dvl_measurement_std_z", DVL_VEL_STD_Z)
+                R_dvl = np.diag([_dvl_xy**2, _dvl_xy**2, _dvl_z**2])
 
                 y_dvl = v_world_meas.reshape(3, 1) - H_dvl @ prior_x.reshape(6, 1)
                 S_dvl = H_dvl @ prior_P @ H_dvl.T + R_dvl
@@ -1121,12 +1142,25 @@ def run_ekf_acoustics(
                     if usv_name is None or usv_name not in state:
                         continue
 
-                    # Use USV pose at CURRENT tick (time aligned)
-                    if "PoseSensor" in state[usv_name]:
-                        usv_pose = state[usv_name]["PoseSensor"]
-                        beacon_pos = usv_pose[0:3, 3]
-                    else:
-                        beacon_pos = state[usv_name].get("LocationSensor", None)
+                    # Use USV beacon position at obs_tick (when the range was measured),
+                    # not the current tick. For stationary USVs this makes no difference,
+                    # but for moving platforms this prevents a systematic position error
+                    # proportional to USV motion during the acoustic round-trip delay.
+                    is_delayed = obs_tick < sim_tick
+                    beacon_pos = None
+                    if is_delayed:
+                        rec_obs = history_by_tick.get(int(obs_tick))
+                        if rec_obs is not None:
+                            beacon_positions_hist = rec_obs.get("beacon_positions", {})
+                            hist_pos = beacon_positions_hist.get(usv_name, None)
+                            if hist_pos is not None:
+                                beacon_pos = np.asarray(hist_pos, dtype=float)
+                    if beacon_pos is None:
+                        # Fallback: use current-tick pose (correct for zero-latency or no history)
+                        if "PoseSensor" in state[usv_name]:
+                            beacon_pos = state[usv_name]["PoseSensor"][0:3, 3]
+                        else:
+                            beacon_pos = state[usv_name].get("LocationSensor", None)
 
                     if beacon_pos is None:
                         continue
@@ -1214,6 +1248,17 @@ def run_ekf_acoustics(
             gdop_3d_series.append(gdop_3d_sel)
             mode_series.append(mode_sel)
 
+            # Snapshot USV beacon positions at this tick for use in delayed acoustic updates.
+            beacon_positions_now: Dict[str, np.ndarray] = {}
+            for uid in selected_usv_ids:
+                uname = id_to_agent.get(uid, None)
+                if uname is None or uname not in state:
+                    continue
+                if "PoseSensor" in state[uname]:
+                    beacon_positions_now[uname] = state[uname]["PoseSensor"][0:3, 3].copy()
+                elif "LocationSensor" in state[uname]:
+                    beacon_positions_now[uname] = np.asarray(state[uname]["LocationSensor"], dtype=float).copy()
+
             _put_tick_history(
                 {
                     "tick": int(sim_tick),
@@ -1223,6 +1268,7 @@ def run_ekf_acoustics(
                     "depth_update": depth_replay_update,
                     "pre_acoustic_x": pre_acoustic_x.copy(),
                     "pre_acoustic_P": pre_acoustic_P.copy(),
+                    "beacon_positions": beacon_positions_now,
                     "acoustic_updates": [
                         {
                             "z_range": float(u["z_range"]),
@@ -1455,6 +1501,7 @@ def run_single_trial(
         "acoustic_uncertainty_trace_thresh": None,
         "acoustic_period_ticks": ACOUSTIC_UPDATE_PERIOD_TICKS,
         "dvl_measurement_std": DVL_VEL_STD,
+        "dvl_measurement_std_z": DVL_VEL_STD_Z,
         "depth_measurement_std": DEPTH_STD,
         "acoustic_measurement_std": ACOUSTIC_RANGE_STD,
         "dvl_extra_std": 0.0,
@@ -1615,7 +1662,7 @@ def run_single_trial(
 
 
 def main(target_names=None, verbose=False, trajectory="lawnmower", show_viewport=False):
-    print("\nRunning EKF fusion: IMU + DVL + Depth + Acoustic_1...")
+    print("\nRunning EKF fusion: IMU + DVL + Depth + Acoustic...")
     (
         times,
         true_pos,
