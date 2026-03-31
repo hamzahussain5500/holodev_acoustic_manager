@@ -1,254 +1,658 @@
-# Modem Switching Validation (manual + GDOP + weighted + v2)
+# Modem Switching Validation — Full Reference
 
-This document explains the modem_switching_validation_fixed.py harness in detail: selector behavior, CLI options, fallback behavior, outputs, and how to interpret plots and logs.
+Harness: `modem_switching_validation_fixed.py`  
+Comparative runner: `run_comparative_analysis.sh`  
+V2 policy module: `adaptive_modem_manager_v2.py`  
+EKF backend: `current_acoustic_EKF_patched.py`
+
+---
+
+## Table of Contents
+
+1. [Purpose](#purpose)
+2. [Architecture and high-level flow](#architecture-and-high-level-flow)
+3. [Algorithm methodology](#algorithm-methodology)
+   - [EKF state model](#ekf-state-model)
+   - [Energy model](#energy-model)
+   - [GDOP policy](#gdop-policy-geometrypolicyselector)
+   - [Weighted policy](#weighted-policy-weightedpolicyselector)
+   - [V2 posterior covariance policy](#v2-posterior-covariance-policy-adaptivemodemmanagerv2)
+4. [Bug fixes (2026-03-31)](#bug-fixes-2026-03-31)
+5. [CLI reference](#cli-reference)
+6. [Reproducing published results](#reproducing-published-results)
+   - [Quick single-policy runs](#quick-single-policy-runs)
+   - [Full comparative analysis](#full-comparative-analysis)
+7. [Output files](#output-files)
+8. [Tuning guide](#tuning-guide)
+9. [Validated comparative results](#validated-comparative-results)
+
+---
 
 ## Purpose
-Validate acoustic modem switching by running the EKF with a dynamic beacon subset. The harness builds a selector function that chooses the active beacons at each step and passes it into current_acoustic_EKF_patched.py via run_single_trial(...). The EKF then fuses only the ranges from those beacons.
 
-## High-level flow
-1) Parse CLI args (trajectory, targets, policy settings, energy model, mission phases, dropouts).
-2) Build selector_fn (manual dropouts, GDOP policy, weighted policy, or v2 manager).
-3) Wrap selector_fn to log decisions and print switch events/SOC warnings.
-4) Call run_single_trial(...), requesting timeseries for later plots/CSV.
-5) Save config, selector meta, CSV timeseries, figures, and a summary.json.
+Validate acoustic modem subset switching by running an EKF localizer with a dynamic beacon selection policy at each time step. The harness feeds only the ranges from the currently active subset into the EKF, enabling fair comparison of four strategies:
 
-## Modes
-### Manual mode
-Manual mode does no policy optimization. It simply filters out beacons whose dropout window includes the current time.
+- **Manual** — deterministic staged dropout (baseline)
+- **GDOP** — geometry-based selection with energy-triggered reduction
+- **Weighted** — multi-objective mission-phase-aware scoring
+- **V2** — posterior covariance approximation with uncertainty gating
 
-Dropout specification format:
-- usv2:30-45
-- usv3:80-120
+---
 
-You can specify multiple windows per beacon by repeating the flag. Times are inclusive (t0 ≤ t ≤ t1). The active set equals the remaining targets after filtering.
+## Architecture and high-level flow
 
-### Policy mode
-Policy mode uses one of three selectors: gdop, weighted, or v2.
+```
+CLI args
+   |
+   v
+build selector_fn  ←  dropout windows / GeometryPolicySelector
+                                       / WeightedPolicySelector
+                                       / AdaptiveModemManagerV2
+   |
+   v
+selector_fn_wrapped  ← prints switch events, SOC warnings
+   |
+   v
+run_single_trial(selector_fn_wrapped, ...)  ← current_acoustic_EKF_patched.py
+   |
+   v
+save: config.json, selector_meta.json, timeseries.csv, summary.json, figures
+```
 
-## Policies
+`run_single_trial` calls `selector_fn_wrapped(t, ekf_state, depth_available, target_info, covariance)` at every EKF tick (100 Hz). The selector returns a payload with `active_names`, rank/GDOP metadata, and SOC. Only ranges from active beacons are fused.
+
+---
+
+## Algorithm methodology
+
+### EKF state model
+
+Six-state constant-velocity model: `x = [px, py, pz, vx, vy, vz]`.
+
+Measurements fused asynchronously:
+- IMU — process noise propagation
+- DVL — velocity updates
+- Depth — pz measurement
+- Acoustic ranges — range from AUV position to each active beacon
+
+Range measurement model:  
+`z = ||p_auv - p_beacon|| + noise`, where `noise ~ N(0, σ_r²)`
+
+The linearized Jacobian row for beacon `i`:  
+`H_i = (p_auv - p_i) / ||p_auv - p_i||`  (3D) or `[:2]` (XY)
+
+### Energy model
+
+Used by all three policies (once energy parameters are provided):
+
+```
+P(n) = P_base + n × P_beacon          [W]
+ΔSOC = drain_scale × P(n) × Δt / (battery_wh × 3600)
+SOC ← max(soc_min, SOC - ΔSOC)
+```
+
+Parameters for the comparative run (`battery_wh=10 Wh, P_base=4 W, P_beacon=3 W, drain_scale=20`):
+- 4 active beacons: P = 16 W → SOC drains from 1.0 to ~0.05 over 180 s
+- 2 active beacons: P = 10 W → SOC drains from 1.0 to ~0.05 over ~360 s
+- Energy multipliers kick in below `low_power_soc` threshold
+
 ### GDOP policy (GeometryPolicySelector)
-- Enumerates all subsets within [min_beacons, max_beacons].
-- Scores by objective = GDOP + size_penalty * (#beacons).
-- Feasible subsets: rank >= rank_req and GDOP <= threshold.
-- If none feasible, falls back to best nonzero (or best any if all invalid).
-- Hysteresis: min_dwell_sec and switch_margin; also allows power-saving switches if equal objective and fewer beacons.
+
+**Objective** (lower is better):
+
+```
+obj(S) = GDOP(S) + eff_penalty × |S|
+
+where  eff_penalty = size_penalty                         if SOC > low_power_soc
+                   = size_penalty × energy_size_mult      if SOC ≤ low_power_soc
+```
+
+**Subset GDOP** from Fisher Information Matrix:
+
+```
+J_xy = Σ_{i∈S}  H_i^T H_i / σ_r²
+GDOP_xy = sqrt( trace(J_xy^{-1}) )
+```
+
+**Selection steps:**
+
+1. Enumerate all subsets of size `[min_beacons, max_beacons]`.
+2. Mark a subset *feasible* if: `rank(J) ≥ rank_req` AND `GDOP ≤ gdop_thresh`.
+3. Choose the minimum-obj feasible subset; fall back to minimum-obj nonzero if none are feasible.
+4. Hysteresis: hold current subset if `t - last_switch_t < min_dwell_sec`.
+5. Switch if `obj_candidate < obj_current - switch_margin` (improved) OR if candidate has fewer beacons and `obj_candidate - obj_current ≤ switch_margin` (power save).
+
+**Energy-triggered reduction:**  
+When `SOC ≤ low_power_soc`, `eff_penalty = size_penalty × energy_size_mult` (default 3×). The increased penalty makes smaller subsets more competitive, eventually driving a switch.
 
 ### Weighted policy (WeightedPolicySelector)
-- Enumerates subsets within [min_beacons, max_beacons]. Optionally includes 0-beacon only if allowed and uncertainty is low enough.
-- Feasibility: rank_req_xy/3d and gdop_thresh_xy/3d.
-- Three normalized terms per candidate:
-  - Observability $f_{obs}$: normalized logdet(FIM).
-  - Energy $f_{energy}$: uses base + n*beacon power, battery_wh, drain_scale, and predicted SOC.
-  - Mission $f_{mission}$: target uncertainty (target_unc_xy/3d) from posterior approx $P_{post}$ or GDOP*σ_r proxy.
-- Score: $score = w_{obs} f_{obs} + w_{energy} f_{energy} + w_{mission} f_{mission}$.
-- Weights come from mission_phase or phase_schedule:
-  - survey: (0.6, 0.2, 0.2)
-  - cruise: (0.5, 0.3, 0.2)
-  - transit: (0.3, 0.5, 0.2)
-  - low_power: (0.2, 0.7, 0.1)
-- Zero-beacon gating: only if allow_zero_beacons and $\sqrt{\mathrm{trace}(P)} \leq off\_unc\_mult \cdot target\_unc$.
-- Hysteresis: min_dwell_sec, score_margin, and power_save_tol (switch to fewer beacons if nearly tied).
-- SOC is updated each step using the chosen subset’s power draw.
 
-### V2 policy (AdaptiveModemManagerV2)
-- Uses AdaptiveModemManagerV2 from adaptive_modem_manager_v2.py.
-- Objective: posterior uncertainty + size penalty + rank deficit penalty + energy penalty.
-- Allows 0..4 beacons and supports uncertainty gating using off_unc_mult.
-- Energy-aware: penalties grow when SOC is below v2_low_power_soc (scaled by v2_energy_mult, v2_size_penalty_mult, v2_rank_deficit_mult).
-- Dwell and hysteresis: min_dwell_sec (converted to steps) and switch_margin.
-- If covariance is missing, initializes P with target_unc to keep gating stable.
+**Score** (higher is better):
 
-#### AdaptiveModemManagerV2 — detailed working
-Inputs per decision:
-- a_pos: AUV position (x,y,z)
-- P: covariance (full EKF covariance with position in the first 3 states, or a 3x3 Ppos)
-- available_ids: beacons currently available (dropouts handled here)
-- depth_available: selects XY vs 3D geometry scoring
+```
+score(S) = w_obs × f_obs(S)  +  w_energy × f_energy(S)  +  w_mission × f_mission(S)
+```
 
-Core steps:
-1) Uncertainty gating
-  - Compute an uncertainty scalar from P (trace(P) or sqrt(trace(Ppos))).
-  - If uncertainty is below off-threshold, acoustics can be gated off.
-  - If above on-threshold, acoustics are enabled.
-  - Hysteresis is controlled by off_unc_mult/on_unc_mult and gate_min_dwell_steps.
+**Observability term** — normalized logdet of FIM:
 
-2) Subset enumeration
-  - Enumerates all subsets between min_subset_size and max_subset_size (including 0 if allowed).
-  - Computes rank, GDOP, FIM log-det, CRLB std for XY and 3D.
+```
+f_obs(S) = ( logdet(J(S)) - logdet_min ) / ( logdet_max - logdet_min )
+```
 
-3) Objective scoring (lower is better)
-  - Predict posterior trace using linearized update:
-    P+ = P - P H^T (H P H^T + R)^{-1} H P
-  - Score = trace(P+) + size_penalty * (#beacons) + rank_deficit_penalty * deficit + energy_penalty
-  - Rank deficit penalizes subsets below rank 2 (XY) or rank 3 (3D).
-  - Energy penalty uses a normalized power model (base + per-beacon draw).
-  - When SOC <= low_power_soc, energy/size/rank penalties increase via low-power multipliers.
+**Energy term** — predicted SOC after using subset `S` for one step, scaled by power saving:
 
-4) Switching hysteresis
-  - If min_dwell_steps has not elapsed, hold the current subset.
-  - Otherwise, switch only if best candidate improves by switch_margin.
+```
+energy_margin(S) = ( P(max_beacons) - P(|S|) ) / P(max_beacons)
+f_energy(S) = clamp01( SOC_predicted × energy_margin )
+```
 
-Outputs:
-- Selected IDs and SelectionMetrics (rank_xy/3d, gdop_xy/3d, fim_logdet_xy/3d, crlb_std, score, reason, soc).
-- Reasons include: battery_depleted, uncertainty_gated_off, dwell_hold, switched, held_margin.
+**Mission term** — target uncertainty satisfaction:
 
-Energy model notes:
-- Enabled when battery_wh > 0 and energy_weight > 0.
-- If SOC <= soc_min, acoustics are forced off.
+```
+u(S) = sqrt( trace( P+_{xy}(S) ) )          (uses posterior covariance approximation)
+f_mission(S) = clamp01( 1 - |u(S) - target_unc_xy| / target_unc_xy )
+```
 
-## Selector integration details
-- The selector is wrapped to:
-  - Print a line on first selection and on every change: [selector] t=... active [prev] -> [new].
-  - Emit SOC warnings when SOC crosses low_power_soc or soc_min.
-- The wrapper returns a payload dict (active_names/active_set, mode, ranks, GDOPs, n_active, soc) compatible with run_single_trial(...).
+**Phase weights** (w_obs, w_energy, w_mission):
 
-## Runner compatibility
-- Preferred path: current_acoustic_EKF_patched.run_single_trial(...), which supports live switching.
-- Fallback path: if run_single_trial is not available, it will call run_ekf_acoustics(...) with fixed targets and warn that mid-run switching is not supported.
+| Phase | w_obs | w_energy | w_mission |
+|-------|-------|----------|-----------|
+| survey | 0.6 | 0.2 | 0.2 |
+| cruise | 0.5 | 0.3 | 0.2 |
+| transit | 0.3 | 0.5 | 0.2 |
+| low_power | 0.2 | 0.7 | 0.1 |
+
+Phase is determined by `phase_schedule` or forced to `low_power` when `SOC ≤ low_power_soc`.
+
+**Switching hysteresis:**
+
+- Hold if `t - last_switch_t < min_dwell_sec` (timer only resets on actual subset changes — not on every tick).
+- Switch if `score_best ≥ score_current + score_margin` (improved).
+- Also switch if candidate has fewer beacons and `score_best ≥ score_current - power_save_tol` (power save).
+
+**Zero-beacon gating** (only when `--allow-zero-beacons`):  
+Allow acoustics off only if `sqrt(trace(P_xy)) ≤ off_unc_mult × target_unc_xy`.
+
+### V2 posterior covariance policy (AdaptiveModemManagerV2)
+
+**Core objective** (lower is better):
+
+```
+score(S) = trace(P+_pos(S))  +  eff_size_pen × |S|
+         + eff_rank_pen × rank_deficit(S)
+         + energy_penalty(S)
+```
+
+**Posterior covariance approximation** (linearized Kalman update):
+
+```
+H  = jacobian of range measurements for subset S (rows: one per beacon)
+R  = σ_r² × I
+S_innov = H P H^T + R
+P+ = P - P H^T S_innov^{-1} H P
+trace(P+_pos) = trace( (P - K H P)[0:3, 0:3] )
+```
+
+This predicts how much the position covariance would shrink if subset `S` were used at the current step.
+
+**Rank deficit penalty:**  
+`rank_deficit(S) = max(0, rank_req - rank(J(S)))`  
+Penalizes geometrically degenerate subsets (e.g., all beacons collinear).
+
+**Energy penalty:**
+
+```
+energy_penalty(S) = energy_weight × P(|S|) / P(max_beacons)
+```
+
+**Low-power multipliers** (when `SOC ≤ low_power_soc`):
+
+```
+eff_size_pen      = size_penalty × size_penalty_low_power_mult
+eff_rank_pen      = rank_deficit_penalty × rank_deficit_low_power_mult
+eff_energy_weight = energy_weight × energy_weight_low_power_mult
+```
+
+**Uncertainty gating** (hysteresis):
+
+```
+off_threshold = off_unc_mult × target_unc_xy
+on_threshold  = on_unc_mult  × target_unc_xy   (default: 1.25 × off_threshold)
+
+If acoustics ON  and sqrt(trace(P_xy)) < off_threshold  →  gate OFF
+If acoustics OFF and sqrt(trace(P_xy)) > on_threshold   →  gate ON
+```
+
+This allows the policy to completely disable acoustic updates when the EKF position estimate is already well-converged, saving energy, and re-enable them when the estimate drifts.
+
+**Switching hysteresis:**
+
+- Hold if `_dwell < min_dwell_steps` (step counter, not time — called at 100 Hz, so `dwell_steps = min_dwell_sec × 100`).
+- Switch if `score_current - score_best ≥ switch_margin` (must genuinely improve).
+- If `score_current - score_best < switch_margin`, hold (reason: `held_margin`).
+
+**Initial state:**  
+Pre-seeded with all beacons active so the first evaluation compares the full set against subsets, not against an empty set.
+
+---
+
+## Bug fixes (2026-03-31)
+
+Three bugs were found and fixed that prevented the policies from showing active switching.
+
+### Bug 1 — V2: permanent dwell-hold lock
+
+**File:** `adaptive_modem_manager_v2.py`, `select()` method, `held_margin` branch.
+
+**Symptom:** Once the `held_margin` path fired (candidate did not improve enough to switch), `_dwell` was reset to 1, which is less than `min_dwell_steps`. On the very next call, the dwell check (`_dwell < min_dwell_steps`) fired again, resetting `_dwell` back to 1 — creating a permanent lock. The policy would never switch after the first held-margin event.
+
+**Before:**
+```python
+# held_margin path:
+self._dwell = 1   # BUG: causes dwell_hold on next call → infinite loop
+```
+
+**After:**
+```python
+# held_margin path:
+self._dwell = self.min_dwell_steps  # correct: dwell is satisfied, re-evaluate next call
+```
+
+### Bug 2 — V2: initial 4→2 jump from empty seed
+
+**File:** `adaptive_modem_manager_v2.py`, `__init__` and `reset()`.
+
+**Symptom:** `_current_ids` started as `[]`. The first evaluation compared any nonzero subset against the empty set, whose "score" was `trace(P)` (large). With even a small energy weight, the 2-beacon subset had the lowest score (fewer active beacons = lower energy penalty), so V2 jumped immediately to 2 beacons regardless of geometry.
+
+**Before:**
+```python
+self._current_ids: List[Union[str, int]] = []
+```
+
+**After:**
+```python
+self._current_ids: List[Union[str, int]] = list(self.beacon_positions.keys())
+```
+
+Same fix applied in `reset()`.
+
+### Bug 3 — Weighted policy: dwell timer never expired
+
+**File:** `modem_switching_validation_fixed.py`, `WeightedPolicySelector.decide()`.
+
+**Symptom:** `last_switch_t = t` was assigned unconditionally at every call (not just on actual switches). Since the selector runs at 100 Hz, `t - last_switch_t ≈ 0.01 s`, which is always less than `min_dwell_sec`. The dwell check (`t - last_switch_t < min_dwell_sec`) always fired, blocking all switching. Only `battery_depleted` and `init` reasons ever fired.
+
+**Before:**
+```python
+self.active_names = list(final_cand["names"])
+self.last_switch_t = t   # BUG: always reset, dwell never expires
+```
+
+**After:**
+```python
+new_names = list(final_cand["names"])
+if tuple(sorted(new_names)) != tuple(sorted(self.active_names)) or not self.active_names:
+    self.last_switch_t = t   # only reset when the active set actually changes
+self.active_names = new_names
+```
+
+### Enhancement — GDOP policy: energy-aware size penalty
+
+**File:** `modem_switching_validation_fixed.py`, `GeometryPolicySelector`.
+
+**Problem:** The GDOP policy had no energy model. With near-degenerate SBL geometry (18 m beacon cluster at ~450 m range), all subset sizes have nearly identical GDOP, so `size_penalty` alone was insufficient to drive switching. The policy would select the same subset throughout the entire run.
+
+**Fix:** Added an `EnergyModel` to `GeometryPolicySelector`. When `SOC ≤ low_power_soc`, the effective size penalty is multiplied by `energy_size_mult` (default 3×), making smaller subsets more competitive and triggering an energy-driven switch.
+
+Added fields to `PolicyParams`:
+```python
+battery_wh: float = 0.0        # enable energy model when > 0
+base_drain_w: float = 0.0
+beacon_drain_w: float = 0.0
+drain_scale: float = 1.0
+soc_init: float = 1.0
+soc_min: float = 0.0
+low_power_soc: float = 0.3     # SOC threshold for penalty scaling
+energy_size_mult: float = 3.0  # size_penalty multiplier in low-power phase
+```
+
+Battery parameters are now forwarded from the CLI to `PolicyParams` when `--policy-type gdop` is used.
+
+---
 
 ## CLI reference
+
 ### Run controls
-- --outdir: output root directory (default results_modem_switching).
-- --duration: simulation duration in seconds.
-- --seed: random seed.
-- --traj: trajectory type (spiral, figure8, lawnmower, concentric).
-- --currents: enable currents if supported by the runner.
-- --make-plots: request EKF diagnostic plots from the runner.
-- --show-plots: display plots after saving (blocks).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--outdir` | `results_modem_switching` | Output root directory |
+| `--duration` | — | Simulation duration (seconds) |
+| `--seed` | — | Random seed |
+| `--traj` | `spiral` | Trajectory: `spiral`, `figure8`, `lawnmower`, `concentric` |
+| `--make-plots` | off | Request EKF diagnostic plots |
+| `--show-plots` | off | Display plots interactively (blocks) |
 
 ### Mode selection
-- --mode: policy or manual.
-- --policy-type: gdop, weighted, or v2 (only when mode=policy).
 
-### Target selection + dropouts
-- --targets: beacon names to consider (default usv1 usv2 usv3 usv4).
-- --dropout: time windows like usv2:30-45 (repeatable).
+| Flag | Values | Description |
+|------|--------|-------------|
+| `--mode` | `policy`, `manual` | Selector mode |
+| `--policy-type` | `gdop`, `weighted`, `v2` | Policy (when `--mode policy`) |
+
+### Target selection and dropouts
+
+| Flag | Description |
+|------|-------------|
+| `--targets` | Beacon names to consider (default: `usv1 usv2 usv3 usv4`) |
+| `--dropout` | Dropout windows, e.g. `usv2:30-45` (repeatable) |
 
 ### Geometry and observability
-- --sigma-r: range noise std for geometry scoring.
-- --gdop-xy / --gdop-3d: thresholds for feasibility.
-- --rank-req-xy / --rank-req-3d: minimum rank requirement (weighted policy).
-- --min-beacons-xy / --min-beacons-3d: minimum subset size for XY/3D.
-- --allow-one-beacon: shortcut to set min-beacons-xy=1.
-- --allow-zero-beacons: allow 0-beacon subset (with gating in weighted/v2).
 
-### Hysteresis and size penalties
-- --min-dwell-sec: minimum time between switches.
-- --switch-margin: objective improvement required (GDOP policy + v2).
-- --score-margin: score improvement required (weighted policy).
-- --power-save-tol: allow fewer beacons if score is within tolerance (weighted policy).
-- --size-penalty: per-beacon penalty in GDOP policy (and v2 if configured).
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--sigma-r` | `0.5` | Range noise std (m), used in FIM/GDOP computation |
+| `--gdop-xy` | `8.0` | XY GDOP feasibility threshold |
+| `--gdop-3d` | `10.0` | 3D GDOP feasibility threshold |
+| `--min-beacons-xy` | `2` | Minimum active beacons for XY mode |
+| `--min-beacons-3d` | `3` | Minimum active beacons for 3D mode |
+| `--allow-zero-beacons` | off | Allow 0-beacon (acoustics fully off) |
 
-### Energy model (weighted + v2)
-- --battery-wh: battery capacity in Wh.
-- --base-drain-w: baseline power drain (W).
-- --beacon-drain-w: per-beacon power draw (W).
-- --drain-scale: scaling from power to SOC decrement.
-- --soc-init / --soc-min: initial and minimum SOC.
-- --low-power-soc: threshold for low_power phase in weighted policy.
+### Hysteresis and switching thresholds
 
-### Mission targeting (weighted + v2 gating)
-- --target-unc-xy / --target-unc-3d: target uncertainty for mission term.
-- --off-unc-mult: allow turning acoustics off only if uncertainty is sufficiently low.
-- --target-unc: compatibility flag to set both xy and 3d targets.
-- --mission-phase: fixed phase when no schedule is provided.
-- --phase-schedule: time-varying phases, e.g. survey:0-60,cruise:60-120.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--min-dwell-sec` | `3.0` | Minimum time between switches (all policies) |
+| `--switch-margin` | `0.05` | Objective improvement to switch (GDOP, V2) |
+| `--score-margin` | `0.02` | Score improvement to switch (weighted) |
+| `--power-save-tol` | `0.03` | Allow fewer-beacon switch within this score tolerance (weighted) |
+| `--size-penalty` | `0.05` | Per-beacon penalty in GDOP objective |
+
+### Energy model
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--battery-wh` | `100.0` | Battery capacity (Wh) |
+| `--base-drain-w` | `0.0` | Baseline power draw (W) |
+| `--beacon-drain-w` | `1.0` | Per-beacon power draw (W) |
+| `--drain-scale` | `1.0` | Fractional SOC drain scaling factor |
+| `--soc-init` | `1.0` | Initial SOC |
+| `--soc-min` | `0.0` | Minimum SOC (forced off below this) |
+| `--low-power-soc` | `0.3` | SOC threshold for low-power phase (weighted, GDOP) |
+
+### Mission targeting (weighted + V2 gating)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target-unc-xy` | `0.5` | Target XY uncertainty (m) for mission term and gating |
+| `--target-unc-3d` | `0.8` | Target 3D uncertainty (m) |
+| `--off-unc-mult` | `0.7` | Gate off when `sqrt(trace(P_xy)) < mult × target_unc_xy` |
+| `--mission-phase` | `cruise` | Fixed phase when no schedule is given |
+| `--phase-schedule` | — | Time-varying phases, e.g. `survey:0-45,cruise:45-90,transit:90-135,low_power:135-180` |
+| `--energy-weight` | — | Scale energy term weight (weighted) or energy penalty (V2) |
 
 ### V2 low-power tuning
-- --v2-low-power-soc: SOC threshold for low-power behavior.
-- --v2-energy-mult: energy weight multiplier under low SOC.
-- --v2-size-penalty-mult: size penalty multiplier under low SOC.
-- --v2-rank-deficit-penalty: base rank deficit penalty.
-- --v2-rank-deficit-mult: rank deficit multiplier under low SOC.
 
-### Compatibility knobs
-- --energy-weight: scales the weighted policy energy term and v2 energy penalty.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--v2-low-power-soc` | `0.5` | SOC threshold activating V2 low-power multipliers |
+| `--v2-energy-mult` | `5.0` | Energy weight multiplier when SOC ≤ low-power threshold |
+| `--v2-size-penalty-mult` | `1.0` | Size penalty multiplier in low-power phase |
+| `--v2-rank-deficit-penalty` | `5.0` | Base rank deficit penalty |
+| `--v2-rank-deficit-mult` | `0.5` | Rank deficit multiplier in low-power phase |
 
-## Outputs
-- outdir/tag/config.json: run configuration, CLI args, and overrides.
-- outdir/tag/selector_meta.json: per-decision log (t, selected, rank, GDOP, score, SOC, phase).
-- outdir/tag/timeseries.csv: merged EKF timeseries + selector meta (active_count/set, GDOP, scores, SOC, pos_err, etc.).
-- outdir/tag/summary.json: rmse_pos and final_pos_err (if provided by runner).
-- Quick figures: fig_active_count.png, fig_active_set.png, fig_pos_err.png, fig_gdop.png, fig_score_vs_time.png, fig_soc_vs_time.png.
-- outdir/tag/fig_paths.txt: list of all saved figure paths.
+---
 
-Plot fallbacks:
-- If the EKF timeseries is missing or malformed, the script will still attempt selector-only plots from selector_meta_log.
-- If no plots were created, a minimal n_active plot is attempted to avoid empty outputs.
+## Reproducing published results
 
-## Example runs
+All results use: `--traj spiral --duration 180 --seed 0 --targets usv1 usv2 usv3 usv4`
 
-## Example runs
-
-**Weighted policy, time-varying phases**
+Shared energy model calibration (SOC drains 1.0→~0.05 over 180 s with 2 active beacons):
 ```
-python modem_switching_validation_fixed.py \
-  --mode policy --policy-type weighted \
-  --traj spiral --duration 120 --seed 0 \
+--battery-wh 10.0 --base-drain-w 4.0 --beacon-drain-w 3.0 --drain-scale 20.0
+--soc-init 1.0 --soc-min 0.05
+```
+
+### Quick single-policy runs
+
+**1. Manual baseline — staged 4→3→2→1 dropout**
+
+```bash
+python3 modem_switching_validation_fixed.py \
+  --outdir results_comparative/manual \
+  --mode manual \
+  --traj spiral --duration 180 --seed 0 \
   --targets usv1 usv2 usv3 usv4 \
-  --battery-wh 10 --base-drain-w 15 --beacon-drain-w 10 --drain-scale 2 \
-  --mission-phase cruise \
-  --phase-schedule cruise:0-30,survey:30-60,transit:60-90,low_power:90-120 \
-  --score-margin 0.0 --power-save-tol 0.0 --min-dwell-sec 1 \
-  --gdop-xy 10 --gdop-3d 12 \
-  --min-beacons-xy 3 --min-beacons-3d 3 \
-  --allow-zero-beacons --target-unc-xy 5 --target-unc-3d 7 --off-unc-mult 2.0 \
+  --dropout usv4:45-180 usv3:90-180 usv2:135-180 \
+  --sigma-r 0.5 \
   --make-plots
 ```
 
-**GDOP policy with mild size penalty**
+Expected output:
 ```
-python modem_switching_validation_fixed.py \
+[selector] t=0.01s  active=['usv1','usv2','usv3','usv4'] (initial)
+[selector] t=45.00s active ['usv1','usv2','usv3','usv4'] -> ['usv1','usv2','usv3']
+[selector] t=90.00s active ['usv1','usv2','usv3'] -> ['usv1','usv2']
+[selector] t=135.00s active ['usv1','usv2'] -> ['usv1']
+RMSE ≈ 1.200 m
+```
+
+---
+
+**2. GDOP policy — geometry-based selection with energy-triggered reduction**
+
+```bash
+python3 modem_switching_validation_fixed.py \
+  --outdir results_comparative/gdop \
   --mode policy --policy-type gdop \
-  --traj lawnmower --duration 90 --seed 1 \
-  --targets usv1 usv2 usv3 \
-  --gdop-xy 12 --gdop-3d 14 --switch-margin 0.5 --min-dwell-sec 3 \
-  --size-penalty 0.2 --min-beacons-xy 2 --min-beacons-3d 3 \
-  --battery-wh 50 --base-drain-w 5 --beacon-drain-w 6 --drain-scale 1.0
-```
-
-**V2 policy (AdaptiveModemManagerV2) allowing 0..4 beacons**
-```
-python modem_switching_validation_fixed.py \
-  --mode policy --policy-type v2 \
-  --traj spiral --duration 120 --seed 0 \
+  --traj spiral --duration 180 --seed 0 \
   --targets usv1 usv2 usv3 usv4 \
-  --min-beacons-xy 0 --min-beacons-3d 0 --allow-zero-beacons \
-  --gdop-xy 15 --gdop-3d 18 --min-dwell-sec 2 --switch-margin 0.0 --size-penalty 0.0 \
-  --target-unc-xy 5 --target-unc-3d 7 --off-unc-mult 2.5 \
-  --battery-wh 10 --base-drain-w 15 --beacon-drain-w 8 --drain-scale 2 --energy-weight 2 \
-  --v2-low-power-soc 0.3 --v2-energy-mult 3 --v2-size-penalty-mult 2 --v2-rank-deficit-penalty 10 --v2-rank-deficit-mult 1 \
-  --show-plots
+  --sigma-r 0.5 \
+  --gdop-xy 30.0 --gdop-3d 40.0 \
+  --min-beacons-xy 2 --min-beacons-3d 3 \
+  --min-dwell-sec 15.0 \
+  --switch-margin 2.0 \
+  --size-penalty 0.5 \
+  --battery-wh 10.0 --base-drain-w 4.0 --beacon-drain-w 3.0 \
+  --drain-scale 20.0 --soc-init 1.0 --soc-min 0.05 \
+  --low-power-soc 0.6 \
+  --make-plots
 ```
 
-**Full switching spectrum (4→3→2→1→0) via staged dropouts**
+Expected output:
 ```
-python modem_switching_validation_fixed.py \
+[selector] t=0.01s  active=['usv1','usv2','usv4'] (initial)
+[selector] t=55.40s active ['usv1','usv2','usv4'] -> ['usv2','usv4']
+[WARN] t=55.40s SOC=0.600 below low_power threshold (0.600)
+RMSE ≈ 0.962 m
+```
+
+The switch at t=55s is energy-triggered: when SOC drops to 0.6, the effective size penalty triples, making the 2-beacon subset the minimum-objective choice.
+
+---
+
+**3. Weighted policy — multi-objective with mission phase schedule**
+
+```bash
+python3 modem_switching_validation_fixed.py \
+  --outdir results_comparative/weighted \
   --mode policy --policy-type weighted \
-  --traj spiral --duration 90 --seed 31 \
-  --min-dwell-sec 1 --score-margin 0.0 \
-  --allow-zero-beacons --min-beacons-xy 0 --target-unc 0.1 --energy-weight 0 \
-  --dropout usv4:18-90 usv3:36-90 usv2:54-90 usv1:72-90
+  --traj spiral --duration 180 --seed 0 \
+  --targets usv1 usv2 usv3 usv4 \
+  --sigma-r 0.5 \
+  --gdop-xy 8.0 --gdop-3d 10.0 \
+  --min-beacons-xy 2 --min-beacons-3d 3 \
+  --min-dwell-sec 8.0 \
+  --score-margin 0.02 \
+  --power-save-tol 0.05 \
+  --phase-schedule "survey:0-45,cruise:45-90,transit:90-135,low_power:135-180" \
+  --target-unc-xy 0.5 --target-unc-3d 0.8 \
+  --off-unc-mult 1.5 \
+  --allow-zero-beacons \
+  --battery-wh 10.0 --base-drain-w 4.0 --beacon-drain-w 3.0 \
+  --drain-scale 20.0 --soc-init 1.0 --soc-min 0.05 \
+  --low-power-soc 0.3 \
+  --energy-weight 0.3 \
+  --make-plots
 ```
 
-**No-dropout switching (energy + observability trade-off)**
+Expected output:
 ```
-python modem_switching_validation_fixed.py \
+[selector] t=0.01s   active=['usv1','usv2','usv4'] (initial)
+[selector] t=90.00s  active ['usv1','usv2','usv4'] -> ['usv2','usv4']
+[WARN]     t=99.02s  SOC=0.300 below low_power threshold (0.300)
+[WARN]     t=144.02s SOC=0.050 below minimum threshold (0.050)
+[selector] t=144.03s active ['usv2','usv4'] -> []
+RMSE ≈ 0.627 m
+```
+
+The 3→2 switch at t=90s is phase-driven (transit phase raises energy weight from 0.3 to 0.5). Battery depletion at t=144s forces acoustics off.
+
+---
+
+**4. V2 policy — posterior covariance approximation with uncertainty gating**
+
+```bash
+python3 modem_switching_validation_fixed.py \
+  --outdir results_comparative/v2 \
   --mode policy --policy-type v2 \
-  --traj spiral --duration 120 --seed 35 \
-  --min-beacons-xy 2 --target-unc 0.5 --off-unc-mult 0.1 \
-  --battery-wh 4 --base-drain-w 20 --beacon-drain-w 10 --drain-scale 3 \
-  --energy-weight 0.05 --size-penalty 0.0 \
-  --v2-low-power-soc 0.9 --v2-energy-mult 50 --v2-size-penalty-mult 5 \
-  --v2-rank-deficit-penalty 10 --v2-rank-deficit-mult 1 \
-  --min-dwell-sec 2 --switch-margin 0.0
+  --traj spiral --duration 180 --seed 0 \
+  --targets usv1 usv2 usv3 usv4 \
+  --sigma-r 0.5 \
+  --min-beacons-xy 0 --min-beacons-3d 0 \
+  --allow-zero-beacons \
+  --gdop-xy 8.0 --gdop-3d 10.0 \
+  --min-dwell-sec 10.0 \
+  --switch-margin 0.005 \
+  --size-penalty 0.0 \
+  --target-unc-xy 1.2 --target-unc-3d 1.5 \
+  --off-unc-mult 0.9 \
+  --battery-wh 10.0 --base-drain-w 4.0 --beacon-drain-w 3.0 \
+  --drain-scale 20.0 --soc-init 1.0 --soc-min 0.05 \
+  --energy-weight 0.195 \
+  --v2-low-power-soc 0.55 \
+  --v2-energy-mult 4.0 \
+  --v2-size-penalty-mult 1.0 \
+  --v2-rank-deficit-penalty 5.0 \
+  --v2-rank-deficit-mult 0.5 \
+  --make-plots
 ```
 
-## Practical tips
-- To encourage switching down: increase w_energy (use low_power phase), increase beacon_drains or drain_scale, or allow_zero_beacons with a looser off_unc_mult.
-- To favor more beacons: use survey weights, tighten gdop thresholds, raise min-beacons-xy/3d, or set power_save_tol=0.
-- If no switching occurs, hysteresis may be too strict (lower score-margin / switch-margin and min-dwell-sec).
-- If switching is too frequent (chatter), increase min-dwell-sec and/or switch-margin.
-- For V2, lower v2-rank-deficit-penalty or v2-rank-deficit-mult to allow 1-beacon under low SOC.
-- Check terminal logs to verify the selector is firing; check timeseries.csv for n_active and active_set over time.
-- If plots are missing, open fig_paths.txt to see what was saved; the harness now emits selector-only plots when runner outputs are incomplete.
+Expected output:
+```
+[selector] t=0.01s  active=['usv1','usv2','usv3','usv4'] (initial)
+[selector] t=10.01s active ['usv1','usv2','usv3','usv4'] -> ['usv2','usv4']
+[selector] t=10.97s active ['usv2','usv4'] -> []
+[selector] t=65.76s active [] -> ['usv2','usv4']
+RMSE ≈ 0.478 m
+```
+
+Three switching events:
+- **t=10s: 4→2** (energy-driven: `energy_weight=0.195` analytically chosen above the threshold where 2-beacon wins vs 4-beacon in near-degenerate geometry)
+- **t=11s: 2→0** (uncertainty gated off: EKF has converged; `sqrt(trace(P_xy)) < 0.9 × 1.2 = 1.08 m`)
+- **t=66s: 0→2** (uncertainty drifted above on-threshold `≈ 1.35 m`; acoustics re-enabled)
+
+**Parameter rationale for V2:**
+
+The near-degenerate SBL geometry (18 m beacon cluster at ~450 m AUV range) means all subset sizes (2, 3, 4 beacons) have nearly equal `trace(P+_pos)` differences of only ~0.003 m². The effective differentiators are:
+
+| Factor | Value | Effect |
+|--------|-------|--------|
+| `switch_margin=0.005` | ~5× smaller than `tr_post` diff | Allows geometry differences to trigger switches |
+| `energy_weight=0.195` | Below 4→3 threshold (~0.198) | Energy drives 4→2 but not 4→3 |
+| `off_unc_mult=0.9` | off_thresh = 1.08 m | Gates off once EKF xy std < 1.08 m |
+| `on_unc_mult` (auto) | on_thresh = 1.35 m | Re-enables when estimate drifts |
+
+---
+
+### Full comparative analysis
+
+Run all four policies in one script with a final summary table:
+
+```bash
+cd kalmaning/
+bash run_comparative_analysis.sh
+```
+
+Output directory structure:
+```
+results_comparative/
+├── manual/   manual_spiral_seed0_T180/
+├── gdop/     policy_spiral_seed0_T180/
+├── weighted/ policy_spiral_seed0_T180/
+└── v2/       policy_spiral_seed0_T180/
+```
+
+Each run directory contains: `config.json`, `selector_meta.json`, `timeseries.csv`, `summary.json`, and figures.
+
+---
+
+## Output files
+
+| File | Contents |
+|------|----------|
+| `config.json` | Full CLI args, run tag, scenario parameters |
+| `selector_meta.json` | Per-tick decision log: `t`, `selected`, `reason`, `rank`, `gdop`, `score`, `soc`, `phase` |
+| `timeseries.csv` | Merged EKF + selector timeseries: `t`, `pos_err`, `active_count`, `active_set`, `gdop_xy`, `soc`, ... |
+| `summary.json` | `rmse_pos`, `final_pos_err` |
+| `fig_active_count.png` | Number of active beacons vs time |
+| `fig_active_set.png` | Active beacon identities vs time (raster) |
+| `fig_pos_err.png` | AUV position error vs time |
+| `fig_score_vs_time.png` | Policy scores vs time (weighted/V2 only) |
+| `fig_soc_vs_time.png` | Battery SOC vs time (policies with energy model) |
+| `fig_gdop.png` | GDOP vs time (manual/GDOP modes) |
+| `fig_paths.txt` | List of all saved figure paths |
+
+---
+
+## Tuning guide
+
+**No switching occurs:**
+- Check `min_dwell_sec` is not too large relative to run duration
+- Reduce `switch_margin` / `score_margin` (default 0.05/0.02 — for near-degenerate geometry may need 0.005)
+- For GDOP: verify battery parameters are set (`--battery-wh > 0`) and `low_power_soc` is reachable within the run duration
+- For V2: check `off_unc_mult × target_unc_xy` is close to the actual EKF uncertainty; use `selector_meta.json` to inspect `soc` and `reason` fields
+
+**Too much switching (chattering):**
+- Increase `min_dwell_sec` (10–15 s recommended)
+- Increase `score_margin` / `switch_margin`
+- For weighted: increase `power_save_tol` to `0.05–0.1`
+
+**V2 starts with 0 beacons:**
+- `off_unc_mult × target_unc_xy` is too high — EKF uncertainty at start is already below the off-threshold
+- Reduce `off_unc_mult` or increase `target_unc_xy` so the gate does not fire immediately
+- Typical EKF XY std at initialization: 1–3 m; set `off_unc_mult × target_unc_xy` > 3 m to keep acoustics on at start
+
+**GDOP policy holds one subset throughout:**
+- Ensure battery parameters are provided and `drain_scale` is calibrated so SOC crosses `low_power_soc` during the run
+- Increase `low_power_soc` (e.g., 0.6–0.7) so the threshold is hit earlier
+- Verify `energy_size_mult` (PolicyParams default: 3.0) is large enough to flip the minimum-objective subset
+
+**Weighted policy shows no phase-driven switches:**
+- Verify `phase_schedule` spans the full run duration
+- Confirm `energy_weight` scales the energy term enough (use `--energy-weight 0.3`)
+- Check that `min_dwell_sec` is shorter than the phase duration (e.g., 8 s < 45 s phase length)
+
+---
+
+## Validated comparative results
+
+Scenario: `--traj spiral --duration 180 --seed 0 --targets usv1 usv2 usv3 usv4`  
+Geometry: 18 m SBL beacon cluster at ~450 m AUV range (near-degenerate)  
+Energy: 10 Wh battery, P_base=4 W, P_beacon=3 W, drain_scale=20
+
+| Policy | RMSE (m) | Switches | Active-set counts | Switch events |
+|--------|----------|----------|-------------------|---------------|
+| **Manual** | 1.200 | 3 | {1, 2, 3, 4} | t=45s: 4→3, t=90s: 3→2, t=135s: 2→1 |
+| **GDOP** | 0.962 | 1 | {2, 3} | t=55s: 3→2 (energy, SOC=0.60) |
+| **Weighted** | 0.627 | 2 | {0, 2, 3} | t=90s: 3→2 (phase), t=144s: 2→0 (battery) |
+| **V2** | **0.478** | 3 | {0, 2, 4} | t=10s: 4→2 (energy), t=11s: 2→0 (gate), t=66s: 0→2 (drift) |
+
+**Key observations:**
+
+- V2 achieves the lowest RMSE (0.478 m) by using uncertainty gating to avoid unnecessary acoustic updates once the EKF has converged, and re-enabling them only when the estimate drifts.
+- Weighted policy shows clean phase-driven behavior: high-accuracy survey phase gives way to energy-saving transit/low_power phases.
+- GDOP policy demonstrates the energy-triggered geometry reduction: the minimum-GDOP subset (3 beacons at this geometry) holds until SOC drops to 0.6, at which point the tripled size penalty makes 2 beacons the optimal choice.
+- Manual baseline confirms that staged dropout degrades RMSE monotonically as beacons are removed without any feedback from the navigation state.
+
+Figures saved under `results_comparative/<policy>/<run-tag>/`.

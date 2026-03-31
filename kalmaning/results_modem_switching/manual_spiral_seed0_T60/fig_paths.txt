@@ -1,0 +1,4 @@
+results_modem_switching/manual_spiral_seed0_T60/fig_active_count.png
+results_modem_switching/manual_spiral_seed0_T60/fig_active_set.png
+results_modem_switching/manual_spiral_seed0_T60/fig_pos_err.png
+results_modem_switching/manual_spiral_seed0_T60/fig_gdop.png

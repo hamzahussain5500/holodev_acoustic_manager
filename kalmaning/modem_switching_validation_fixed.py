@@ -225,6 +225,16 @@ class PolicyParams:
     min_beacons_xy: int = 2            # typical for XY observability
     min_beacons_3d: int = 3            # typical for 3D observability
     max_beacons: int = 4
+    # Energy model parameters (optional; if battery_wh > 0, energy-aware size penalty applied)
+    battery_wh: float = 0.0
+    base_drain_w: float = 0.0
+    beacon_drain_w: float = 0.0
+    drain_scale: float = 1.0
+    soc_init: float = 1.0
+    soc_min: float = 0.0
+    # Low-power phase: when SOC drops below this, size_penalty is multiplied by energy_size_mult
+    low_power_soc: float = 0.3
+    energy_size_mult: float = 3.0      # size_penalty multiplier during low-power phase
 
 
 class GeometryPolicySelector:
@@ -239,17 +249,36 @@ class GeometryPolicySelector:
         self.active_names: List[str] = []
         self.last_switch_t: float = -1e9
         self.last_obj: float = float("inf")
+        self.last_t: Optional[float] = None
+        # Initialize energy model if battery parameters provided
+        if params.battery_wh > 0:
+            self.energy: Optional[EnergyModel] = EnergyModel(
+                params.base_drain_w, params.beacon_drain_w,
+                params.battery_wh, params.drain_scale,
+                params.soc_init, params.soc_min
+            )
+        else:
+            self.energy = None
 
     def _score_subset(self, auv_pos: np.ndarray, subset: List[Tuple[str, np.ndarray]], mode: str) -> Tuple[float, Dict[str, Any]]:
         m = geom_metrics(auv_pos, subset, sigma_r=self.p.sigma_r, mode=mode)
         gdop = float(m["gdop"])
         if not math.isfinite(gdop):
             gdop = float("inf")
-        # objective: geometry + size cost
-        obj = gdop + self.p.size_penalty * float(m["size"])
+        # Energy-aware size penalty: scale up when SOC is low
+        eff_penalty = self.p.size_penalty
+        if self.energy is not None and self.energy.soc <= self.p.low_power_soc:
+            eff_penalty = self.p.size_penalty * self.p.energy_size_mult
+        obj = gdop + eff_penalty * float(m["size"])
         return obj, m
 
     def decide(self, t: float, xhat: np.ndarray, depth_available: bool, target_info: List[Tuple[str, np.ndarray]]) -> Tuple[List[str], Dict[str, Any]]:
+        # Step energy model
+        dt = 0.0 if self.last_t is None else max(0.0, float(t) - float(self.last_t))
+        if self.energy is not None:
+            self.energy.step(dt, len(self.active_names))
+        self.last_t = t
+
         auv_pos = np.asarray(xhat[:3], dtype=float)
         mode = "xy" if depth_available else "3d"
         rank_req = 2 if depth_available else 3
@@ -294,12 +323,8 @@ class GeometryPolicySelector:
 
                 # feasibility check
                 if metrics["rank"] >= rank_req and math.isfinite(metrics["gdop"]) and metrics["gdop"] <= gdop_thresh:
-                    if best_feasible is None:
+                    if best_feasible is None or obj < best_feasible[0]:
                         best_feasible = (obj, list(combo), metrics)
-                    else:
-                        # Prefer smaller size first, then lower objective
-                        if len(combo) < len(best_feasible[1]) or (len(combo) == len(best_feasible[1]) and obj < best_feasible[0]):
-                            best_feasible = (obj, list(combo), metrics)
 
         # choose candidate: feasible if exists else best_any
         chosen = best_feasible if best_feasible is not None else (best_nonzero if best_nonzero is not None else best_any)
@@ -328,7 +353,7 @@ class GeometryPolicySelector:
                 # keep current
                 keep_metrics = geom_metrics(auv_pos, [(n, name_to_pos[n]) for n in self.active_names if n in name_to_pos],
                                            sigma_r=self.p.sigma_r, mode=mode)
-                return self.active_names, {"mode": mode, "reason": "dwell_hold", **keep_metrics}
+                return self.active_names, {"mode": mode, "reason": "dwell_hold", "soc": self.energy.soc if self.energy is not None else None, **keep_metrics}
 
             # compute current objective
             cur_subset = [(n, name_to_pos[n]) for n in self.active_names if n in name_to_pos]
@@ -341,7 +366,7 @@ class GeometryPolicySelector:
                 reason = "switch"
             else:
                 # keep current
-                return self.active_names, {"mode": mode, "reason": "no_switch", **cur_metrics}
+                return self.active_names, {"mode": mode, "reason": "no_switch", "soc": self.energy.soc if self.energy is not None else None, **cur_metrics}
 
         # apply switch / init
         self.active_names = cand_names
@@ -358,6 +383,7 @@ class GeometryPolicySelector:
             "gdop_xy": cand_metrics.get("gdop_xy", float("nan")),
             "rank_3d": cand_metrics.get("rank_3d", 0),
             "gdop_3d": cand_metrics.get("gdop_3d", float("nan")),
+            "soc": self.energy.soc if self.energy is not None else None,
         }
         return cand_names, meta
 
@@ -717,8 +743,11 @@ class WeightedPolicySelector:
                     if current_candidate is not None:
                         final_cand = current_candidate
 
-        self.active_names = list(final_cand["names"])
-        self.last_switch_t = t
+        # Only reset the dwell timer when the active set actually changes.
+        new_names = list(final_cand["names"])
+        if tuple(sorted(new_names)) != tuple(sorted(self.active_names)) or not self.active_names:
+            self.last_switch_t = t
+        self.active_names = new_names
         self.last_score = final_cand["score"]
         # Commit SOC step using chosen set
         self.energy.step(dt, len(self.active_names))
@@ -860,15 +889,15 @@ def build_argparser() -> argparse.ArgumentParser:
 
     # Policy parameters (shared)
     ap.add_argument("--sigma-r", type=float, default=0.5, help="Range noise std for geometry scoring (m).")
-    ap.add_argument("--gdop-xy", type=float, default=15.0, help="GDOP threshold in XY mode (depth available).")
-    ap.add_argument("--gdop-3d", type=float, default=15.0, help="GDOP threshold in 3D mode (no depth).")
-    ap.add_argument("--switch-margin", type=float, default=1.0, help="Switch only if objective improves by this margin (GDOP policy).")
-    ap.add_argument("--min-dwell-sec", type=float, default=5.0, help="Minimum seconds between switches.")
-    ap.add_argument("--size-penalty", type=float, default=0.0, help="Add penalty per active beacon to favor smaller sets (GDOP policy).")
+    ap.add_argument("--gdop-xy", type=float, default=8.0, help="GDOP threshold in XY mode (depth available). 4-beacons in good geometry gives ~1.0-3.0; 2-beacons ~2-8.")
+    ap.add_argument("--gdop-3d", type=float, default=10.0, help="GDOP threshold in 3D mode (no depth).")
+    ap.add_argument("--switch-margin", type=float, default=0.05, help="Switch only if objective improves by this margin. For GDOP policy: GDOP units (~0.3-1.0); for v2: trace(Ppost) in m^2 (~0.01-0.1).")
+    ap.add_argument("--min-dwell-sec", type=float, default=3.0, help="Minimum seconds between switches.")
+    ap.add_argument("--size-penalty", type=float, default=0.05, help="Add penalty per active beacon to favor smaller sets. For v2: units are m^2/beacon; set ~0.03-0.1 for realistic switching incentive.")
 
     # Weighted policy parameters
-    ap.add_argument("--score-margin", type=float, default=0.05, help="Score margin required to switch (weighted policy).")
-    ap.add_argument("--power-save-tol", type=float, default=0.02, help="Allow switching to fewer beacons if score no worse than tol (weighted policy).")
+    ap.add_argument("--score-margin", type=float, default=0.02, help="Score margin required to switch (weighted policy). Normalized [0,1] scores; 0.02 means 2% improvement needed.")
+    ap.add_argument("--power-save-tol", type=float, default=0.03, help="Allow switching to fewer beacons if score no worse than tol (weighted policy).")
     ap.add_argument("--rank-req-xy", type=int, default=2, help="Rank requirement in XY mode for feasibility (weighted policy).")
     ap.add_argument("--rank-req-3d", type=int, default=3, help="Rank requirement in 3D mode for feasibility (weighted policy).")
 
@@ -882,9 +911,9 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--low-power-soc", type=float, default=0.1, help="SOC threshold to enter low_power phase.")
 
     # Mission term / uncertainty targets
-    ap.add_argument("--target-unc-xy", type=float, default=5.0, help="Target sqrt(trace(P_xy)) (m) for mission scoring when depth available.")
-    ap.add_argument("--target-unc-3d", type=float, default=8.0, help="Target sqrt(trace(P_xyz)) (m) for mission scoring when depth unavailable.")
-    ap.add_argument("--off-unc-mult", type=float, default=1.5, help="Allow zero-beacon only if unc <= off_unc_mult * target_unc.")
+    ap.add_argument("--target-unc-xy", type=float, default=0.5, help="Target sqrt(trace(P_xy)) (m) for mission scoring / gating when depth available. Should match realistic EKF position uncertainty (~0.3-0.7 m).")
+    ap.add_argument("--target-unc-3d", type=float, default=0.8, help="Target sqrt(trace(P_xyz)) (m) for mission scoring / gating when depth unavailable.")
+    ap.add_argument("--off-unc-mult", type=float, default=0.7, help="Allow zero-beacon only if unc <= off_unc_mult * target_unc. Values <1 gate off only when well below target.")
     ap.add_argument("--target-unc", type=float, default=None, help="(compat) Set both target-unc-xy and target-unc-3d to this value.")
 
     # Mission phase control
@@ -893,11 +922,11 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--churn-interval-sec", type=float, default=0.0, help="If >0, periodically rotate among near-best subsets to force switching (seconds).")
     ap.add_argument("--churn-score-eps", type=float, default=0.02, help="Score proximity for churn candidate selection.")
     ap.add_argument("--energy-weight", type=float, default=None, help="(compat) Scale the energy weight in the weighted policy (values >1 emphasize energy).")
-    ap.add_argument("--v2-low-power-soc", type=float, default=0.2, help="(v2) SOC threshold for low-power behavior.")
-    ap.add_argument("--v2-energy-mult", type=float, default=2.0, help="(v2) Energy weight multiplier when SOC is low.")
-    ap.add_argument("--v2-size-penalty-mult", type=float, default=2.0, help="(v2) Size penalty multiplier when SOC is low.")
+    ap.add_argument("--v2-low-power-soc", type=float, default=0.5, help="(v2) SOC threshold for low-power behavior. Set high (0.5-0.8) to trigger energy conservation earlier.")
+    ap.add_argument("--v2-energy-mult", type=float, default=5.0, help="(v2) Energy weight multiplier when SOC is low. Higher value drives stronger subset reduction.")
+    ap.add_argument("--v2-size-penalty-mult", type=float, default=3.0, help="(v2) Size penalty multiplier when SOC is low.")
     ap.add_argument("--v2-rank-deficit-mult", type=float, default=1.0, help="(v2) Rank deficit penalty multiplier when SOC is low (use <1 to allow 1-beacon).")
-    ap.add_argument("--v2-rank-deficit-penalty", type=float, default=10.0, help="(v2) Base rank deficit penalty (lower to allow 1-beacon).")
+    ap.add_argument("--v2-rank-deficit-penalty", type=float, default=5.0, help="(v2) Base rank deficit penalty. Lower values (3-5) allow 1-beacon subsets when beneficial.")
 
     # Allow 0..4 / 1-beacon behavior
     ap.add_argument("--min-beacons-xy", type=int, default=2, help="Minimum beacons when depth is available (XY geometry).")
@@ -1043,8 +1072,12 @@ def main():
                     raise ImportError("adaptive_modem_manager_v2.AdaptiveModemManagerV2 is not available")
 
                 mgr_v2: Optional[AdaptiveModemManagerV2Type] = None
+                # Selector is called at 100 Hz (every EKF tick).
+                # Convert min_dwell_sec -> steps at that rate.
                 ticks_per_sec = 100.0
                 dwell_steps = max(1, int(round(args.min_dwell_sec * ticks_per_sec))) if args.min_dwell_sec > 0 else 1
+                # gate_min_dwell: keep gating decision stable for the same period
+                gate_dwell_steps = max(1, int(round(args.min_dwell_sec * ticks_per_sec))) if args.min_dwell_sec > 0 else 1
 
                 def selector_fn(t: float, xhat: np.ndarray, depth_available: bool, target_info: List[Tuple[str, np.ndarray]], covariance: Optional[np.ndarray] = None):
                     nonlocal mgr_v2
@@ -1064,7 +1097,7 @@ def main():
                             target_unc_xy=args.target_unc_xy,
                             target_unc_3d=args.target_unc_3d,
                             off_unc_mult=args.off_unc_mult,
-                            gate_min_dwell_steps=dwell_steps,
+                            gate_min_dwell_steps=gate_dwell_steps,
                             min_subset_size=0,
                             max_subset_size=4,
                             prefer_smaller=True,
@@ -1143,6 +1176,13 @@ def main():
                         min_beacons_xy=args.min_beacons_xy,
                         min_beacons_3d=args.min_beacons_3d,
                         max_beacons=4,
+                        battery_wh=float(args.battery_wh),
+                        base_drain_w=float(args.base_drain_w),
+                        beacon_drain_w=float(args.beacon_drain_w),
+                        drain_scale=float(args.drain_scale),
+                        soc_init=float(args.soc_init),
+                        soc_min=float(args.soc_min),
+                        low_power_soc=float(args.low_power_soc),
                     )
                     sel = GeometryPolicySelector(params)
 
