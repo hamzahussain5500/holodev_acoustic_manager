@@ -42,13 +42,13 @@ def default_static_beacons(n: int = 4, radius: float = 50.0, z: float = 0.0) -> 
 def default_trajectory(num_points: int = 600) -> np.ndarray:
     cfg = {
         "trajectory": "spiral",
-        "spiral_center": (0.0, 0.0),
-        "spiral_min_radius": 10.0,
-        "spiral_max_radius": 60.0,
-        "spiral_turns": 4,
-        "spiral_points_per_rev": max(50, num_points // 4),
+        "spiral_center": (200.0, -200.0),
+        "spiral_min_radius": 20.0,
+        "spiral_max_radius": 50.0,
+        "spiral_turns": 6.0,
+        "spiral_points_per_rev": 250, #max(50, num_points // 4),
         "spiral_z_start": -5.0,
-        "spiral_z_end": -20.0,
+        "spiral_z_end": -150.0,
     }
     traj = build_trajectory("spiral", cfg)
     if traj.shape[0] > num_points:

@@ -766,6 +766,73 @@ def save_fig(path: Path):
         plt.close()
 
 
+def _build_switch_events_from_meta(meta_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return switch events with concise labels for plotting."""
+    events: List[Dict[str, Any]] = []
+    prev_set = None
+    for row in meta_rows:
+        selected = row.get("selected", [])
+        if isinstance(selected, (list, tuple)):
+            set_str = ",".join(selected)
+        elif selected is None:
+            set_str = ""
+        else:
+            set_str = str(selected)
+        if prev_set is None or set_str != prev_set:
+            events.append({
+                "t": float(row.get("t", 0.0)),
+                "set": set_str,
+                "reason": str(row.get("reason", "") or ""),
+            })
+            prev_set = set_str
+    return events
+
+
+def _annotate_switch_reasons(ax, events: List[Dict[str, Any]], y_min: float, y_max: float) -> None:
+    """Annotate switch points with short tags and readable reason list box."""
+    if not events:
+        return
+
+    yr = max(1e-6, float(y_max - y_min))
+    y_tag_hi = y_max - 0.06 * yr
+    y_tag_lo = y_max - 0.14 * yr
+
+    lines: List[str] = []
+    for i, ev in enumerate(events, start=1):
+        t_ev = float(ev.get("t", 0.0))
+        set_txt = ev.get("set", "")
+        reason_txt = ev.get("reason", "")
+        short_id = f"S{i}"
+        ax.axvline(t_ev, color="gray", linestyle="--", alpha=0.35, linewidth=1.0)
+        ax.text(
+            t_ev,
+            y_tag_hi if i % 2 else y_tag_lo,
+            short_id,
+            fontsize=8,
+            ha="center",
+            va="top",
+            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="#999999", alpha=0.9),
+        )
+
+        set_part = f"set=[{set_txt}]" if set_txt else "set=[]"
+        reason_part = f" | reason={reason_txt}" if reason_txt else ""
+        lines.append(f"{short_id}: t={t_ev:.1f}s, {set_part}{reason_part}")
+
+    legend_text = "Switch reasons\n" + "\n".join(lines[:8])
+    if len(lines) > 8:
+        legend_text += f"\n... ({len(lines) - 8} more)"
+    ax.text(
+        0.01,
+        0.02,
+        legend_text,
+        transform=ax.transAxes,
+        fontsize=8,
+        va="bottom",
+        ha="left",
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#cccccc", alpha=0.92),
+    )
+
+
 
 # =============================================================================
 # Main
@@ -1214,32 +1281,17 @@ def main():
                 plt.ylabel("# active beacons")
                 plt.grid(True, alpha=0.3)
 
-                # Annotate switches with active set + key config
-                if not meta_df.empty and "active_set_str" in meta_df.columns:
-                    meta_df_sorted = meta_df.sort_values("t")
-                    prev = None
-                    for _, row in meta_df_sorted.iterrows():
-                        cur = row.get("active_set_str", "")
-                        if prev is None or cur != prev:
-                            reason = row.get("reason", "")
-                            phase = row.get("phase", "")
-                            w_obs = row.get("w_obs", None)
-                            w_energy = row.get("w_energy", None)
-                            w_mission = row.get("w_mission", None)
-                            soc = row.get("soc", None)
-                            parts = [f"set=[{cur}]" if cur else "set=[]"]
-                            if reason:
-                                parts.append(f"reason={reason}")
-                            if phase:
-                                parts.append(f"phase={phase}")
-                            if w_obs is not None and w_energy is not None and w_mission is not None:
-                                parts.append(f"w=({w_obs:.2f},{w_energy:.2f},{w_mission:.2f})")
-                            if soc is not None and isinstance(soc, (int, float, np.floating)):
-                                parts.append(f"soc={float(soc):.2f}")
-                            label = " | ".join(parts)
-                            plt.axvline(float(row["t"]), color="gray", linestyle="--", alpha=0.3)
-                            plt.text(float(row["t"]), df["active_count"].max() + 0.05, label, rotation=90, va="bottom", fontsize=7)
-                            prev = cur
+                # Annotate switches with compact IDs + readable reason panel
+                if not meta_df.empty:
+                    meta_rows = meta_df.sort_values("t").to_dict(orient="records")
+                    events = _build_switch_events_from_meta(meta_rows)
+                    y_vals = np.asarray(df["active_count"], dtype=float)
+                    y_min = float(np.nanmin(y_vals)) if np.isfinite(y_vals).any() else 0.0
+                    y_max = float(np.nanmax(y_vals)) if np.isfinite(y_vals).any() else 1.0
+                    if y_max <= y_min:
+                        y_max = y_min + 1.0
+                    plt.ylim(y_min - 0.02 * (y_max - y_min), y_max + 0.24 * (y_max - y_min))
+                    _annotate_switch_reasons(plt.gca(), events, y_min, y_max)
                 save_fig(out_dir / "fig_active_count.png")
 
             if "t" in df.columns and "active_set_str" in df.columns:
@@ -1330,6 +1382,7 @@ def main():
                     ",".join(m.get("selected", [])) if isinstance(m.get("selected", []), (list, tuple)) else ("" if m.get("selected", None) is None else str(m.get("selected", None)))
                     for m in meta
                 ]) if meta else np.asarray([])
+                reason_arr = np.asarray([m.get("reason", "") for m in meta]) if meta else np.asarray([])
                 soc_arr = np.asarray([m.get("soc", "") for m in meta]) if meta else np.asarray([])
                 phase_arr = np.asarray([m.get("phase", "") for m in meta]) if meta else np.asarray([])
                 score_arr = np.asarray([m.get("score", "") for m in meta]) if meta else np.asarray([])
@@ -1385,12 +1438,20 @@ def main():
                     plt.ylabel("# active beacons")
                     plt.grid(True, alpha=0.3)
                     if meta and active_set_str.size and meta_times.size:
+                        events = []
                         prev = None
-                        for tt, aset in zip(meta_times, active_set_str):
+                        for i, (tt, aset) in enumerate(zip(meta_times, active_set_str)):
                             if prev is None or aset != prev:
-                                plt.axvline(float(tt), color="gray", linestyle="--", alpha=0.3)
-                                plt.text(float(tt), float(np.nanmax(active_count)) + 0.05, f"set=[{aset}]", rotation=90, va="bottom", fontsize=7)
+                                reason = str(reason_arr[i]) if reason_arr.size and i < len(reason_arr) else ""
+                                events.append({"t": float(tt), "set": str(aset), "reason": reason})
                                 prev = aset
+                        y_vals = np.asarray(active_count, dtype=float)
+                        y_min = float(np.nanmin(y_vals)) if np.isfinite(y_vals).any() else 0.0
+                        y_max = float(np.nanmax(y_vals)) if np.isfinite(y_vals).any() else 1.0
+                        if y_max <= y_min:
+                            y_max = y_min + 1.0
+                        plt.ylim(y_min - 0.02 * (y_max - y_min), y_max + 0.24 * (y_max - y_min))
+                        _annotate_switch_reasons(plt.gca(), events, y_min, y_max)
                     save_fig(out_dir / "fig_active_count.png")
 
                 if meta and active_set_str.size and meta_times.size:

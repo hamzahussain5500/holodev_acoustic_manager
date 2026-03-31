@@ -1,0 +1,5 @@
+{
+  "rmse_pos": 0.3591978066921284,
+  "final_pos_err": 0.5331816978820215,
+  "out_dir": "results_modem_switching/policy_lawnmower_seed123_T90"
+}

@@ -2,6 +2,40 @@
 
 This script runs a single HoloOcean EKF simulation that fuses IMU, DVL, depth, and acoustic ranges. It supports multiple acoustic beacons, optional modem selection, and produces diagnostics such as RMSE, NEES/NIS, and plots when run directly.
 
+## Validation summary — bugs found and fixes applied
+
+Six issues were identified by running NEES/NIS consistency tests across multiple seeds and comparing EKF outputs against ground truth.
+
+### 1. `DEPTH_HZ` was 50 Hz — should be 100 Hz
+`DepthSensor` has no `Hz` field in `usv_auv_100_imu.json`, so HoloOcean defaults it to `ticks_per_sec = 100`. The code was scheduling depth updates at half the actual rate, causing missed measurements.
+**Fix:** `DEPTH_HZ = 100`.
+
+### 2. `Q_POS_STD` was 0.10 — should be 0.0
+The EKF uses `Q = B·Qa·Bᵀ` (IMU acceleration drives process noise), which already injects position diffusion through the double-integration structure of `B`. Adding a separate `q_pos_std` term inflated `P` beyond what the model warranted, making the filter over-confident about uncertainty growth.
+**Fix:** `Q_POS_STD = 0.0`.
+
+### 3. `Q_VEL_STD` was 0.22 — tuned to 0.3 m/s²
+`Q_VEL_STD` represents unmodelled vehicle manoeuvre uncertainty (not IMU sensor noise). A sweep showed `Q_VEL_STD = 0.22` gave `NEES_3D ≈ 0.6` (over-confident filter). Setting it to 0.30 gives `NEES_3D ≈ 1.0` for DVL + Depth alone — the correct baseline before acoustic updates.
+**Fix:** `Q_VEL_STD = 0.3`.
+
+### 4. `ACOUSTIC_RANGE_STD` was 0.03 m — set to 0.30 m
+The JSON `DistanceSigma` fields (0.1 / 0.3) are **ignored** by HoloOcean's `AcousticBeaconSensor`. Empirical measurement showed actual range noise std ≈ 0.0001 m (near-zero). However, all 4 USV beacons cluster within 18 m at ≈ 450 m range, giving a near-rank-1 FIM with almost no lateral observability. Setting `R_acoustic` to the actual noise (0.03 m) caused `P` to collapse in poorly-observed directions while the true position error remained large, producing NEES blow-up (observed NEES_3D > 700 in runs with Q=0.03). A 0.30 m floor acts as geometry-informed regularisation.
+**Fix:** `ACOUSTIC_RANGE_STD = 0.30`.
+
+### 5. DVL R matrix was isotropic — made anisotropic
+The original code set `R_dvl = diag([std², std², std²])` using a single `DVL_VEL_STD`. Empirical measurement showed XY-axis DVL noise std ≈ 0.44 m/s but Z-axis noise std ≈ 0.13 m/s (≈ 3× smaller). Using the same value for all three axes over-weighted Z velocity measurements (Z noise underestimated by 3×), causing incorrect velocity covariance.
+
+The suggested fix of changing `DVL_VEL_STD` from 0.45 → 0.24 (based on the JSON `VelSigma: 0.24` beam value) was **incorrect** — the JSON value is per acoustic-beam, not per world-frame axis. HoloOcean's DVL outputs processed world-frame velocity, and empirical XY std was confirmed at ≈ 0.44–0.45 m/s.
+
+**Fix:** `DVL_VEL_STD = 0.45` (XY, unchanged), `DVL_VEL_STD_Z = 0.13` (Z, new), `R_dvl = diag([0.45², 0.45², 0.13²])`.
+
+### 6. Delayed acoustic update used wrong beacon position
+When an acoustic response arrived with latency > 0 ticks, the code looked up the USV beacon position from the **current** tick's state — not the position at the time the ranging request was sent (`obs_tick`). If USVs are moving, this introduces a systematic range innovation error proportional to USV displacement during the round-trip.
+
+**Fix:** The tick-history buffer now stores a `beacon_positions` snapshot at each tick. When a delayed response arrives, the beacon position is looked up at `obs_tick`. Falls back to current position if history is unavailable.
+
+---
+
 ## What the script does (step‑by‑step)
 
 ### 1) Global configuration
