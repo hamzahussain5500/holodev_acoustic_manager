@@ -104,6 +104,26 @@ These plots are shown when running the script directly.
 /usr/bin/python current_acoustic_EKF_patched.py --trajectory spiral --show-viewport
 ```
 
+## Tuned noise parameters (empirically validated)
+
+All values below were determined by running the simulator and measuring actual sensor outputs against ground truth. Do not change them without re-running the validation sweep.
+
+| Constant | Value | How determined |
+|---|---|---|
+| `DEPTH_HZ` | `100` Hz | `DepthSensor` has no `Hz` field in `usv_auv_100_imu.json` — HoloOcean defaults to `ticks_per_sec` (100 Hz). Previously wrong at 50 Hz. |
+| `Q_POS_STD` | `0.0` | Position random-walk is redundant: the IMU-driven `Q = B·Qa·Bᵀ` already provides position diffusion. Setting this to non-zero inflates `P` unnecessarily. |
+| `Q_VEL_STD` | `0.3 m/s²` | Represents unmodelled vehicle manoeuvre uncertainty (not IMU noise). Tuned empirically: gives `NEES_3D ≈ 1.0` for DVL+Depth alone (no acoustics). |
+| `DVL_VEL_STD` | `0.45 m/s` (XY) | Empirically measured from simulator: per-axis XY noise std ≈ 0.44 m/s. |
+| `DVL_VEL_STD_Z` | `0.13 m/s` (Z) | Empirically measured: Z-axis DVL noise is ≈ 3× smaller than XY. `R_dvl` is now anisotropic: `diag([0.45², 0.45², 0.13²])`. |
+| `DEPTH_STD` | `0.03 m` | Confirmed from simulator: matches `"Sigma": 0.03` in JSON. |
+| `ACOUSTIC_RANGE_STD` | `0.30 m` | Simulator returns near-zero acoustic noise (std ≈ 0.0001 m). The 0.30 m floor is a geometry-informed regularisation: all 4 USV beacons cluster within 18 m at ≈ 450 m range from the AUV, giving a near-rank-1 FIM (poor lateral observability). Without this floor the filter collapses `P` in directions it cannot genuinely observe. Validated: gives `NEES_3D ≈ 3.0` (consistent) across 5 seeds. |
+
+> **Important — `DistanceSigma` in JSON is ignored by HoloOcean acoustic sensor:**
+> The `DistanceSigma` fields in `usv_auv_100_imu.json` (AUV: 0.1, USVs: 0.3) do not appear
+> to inject noise into the range measurements returned by `AcousticBeaconSensor`.
+> Measured range error std is ≈ 0.0001 m. Set `ACOUSTIC_RANGE_STD` based on your
+> geometry/linearisation requirements, not the JSON sigma values.
+
 ## Key configuration fields (used in `config_overrides`)
 
 You can pass these via `run_single_trial(..., config_overrides=...)`:
@@ -114,7 +134,10 @@ You can pass these via `run_single_trial(..., config_overrides=...)`:
 - `use_all_acoustic`: enable all beacons
 - `modem_selector_fn`: adaptive selector callback
 - `acoustic_period_ticks`: acoustic request rate (total across round-robin targets)
-- `dvl_measurement_std`, `depth_measurement_std`, `acoustic_measurement_std`
+- `dvl_measurement_std`: DVL XY-axis velocity noise std (m/s), default `DVL_VEL_STD = 0.45`
+- `dvl_measurement_std_z`: DVL Z-axis velocity noise std (m/s), default `DVL_VEL_STD_Z = 0.13`
+- `depth_measurement_std`: depth sensor noise std (m), default `DEPTH_STD = 0.03`
+- `acoustic_measurement_std`: acoustic range noise std (m), default `ACOUSTIC_RANGE_STD = 0.30`
 - `imu_accel_extra_std`, `imu_bias_rw_std`, `dvl_extra_std`, `depth_extra_std`, `range_extra_std`
 - `q_pos_std`, `q_vel_std`, `p_pos_std_init`, `p_vel_std_init`
 - `ekf_mode`: `"asynchronous"` (documentary mode flag)
@@ -127,11 +150,26 @@ You can pass these via `run_single_trial(..., config_overrides=...)`:
 - The EKF uses **one `env.step()` per heartbeat** with dynamic `dt` for time consistency.
 - DVL/depth are applied asynchronously via due-tick scheduling (multi-rate behavior).
 - Acoustic responses are processed asynchronously in the main loop.
+- **DVL R matrix is anisotropic**: Z-axis noise (0.13 m/s) is modelled separately from XY (0.45 m/s). Override with `dvl_measurement_std_z` if needed.
+- **Delayed acoustic beacon position fix**: when an acoustic response arrives with latency > 0, the USV beacon position used for the range innovation is looked up from the tick-history buffer at `obs_tick` (the time the request was sent), not the current tick. This prevents a systematic error if USVs are moving. Falls back to current-tick position if history is unavailable.
 - Delayed acoustic rewind/replay is implemented as a fixed-lag buffer over recent ticks.
 - If delayed data is older than the retained buffer window, the implementation falls back to current-state update behavior.
 - Use `return_timeseries=True` for Monte Carlo analysis and plotting.
 - If you use adaptive modem selection, ensure beacons are named consistently (`usv1..usv4`).
 - No `holoocean_uuid` wiring is needed; the environment manages IDs internally.
+
+## Known structural limitation — beacon geometry
+
+The 4 USV beacons in `usv_auv_100_imu.json` are positioned within an 18 m cluster at approximately 450 m from the AUV spawn point:
+
+| Beacon | Position |
+|---|---|
+| usv1 | `[0, -660, 0]` |
+| usv2 | `[15, -660, 0]` |
+| usv3 | `[10, -650, 0]` |
+| usv4 | `[0, -650, -10]` |
+
+All four beacons subtend less than 3° of angle from the AUV. The FIM is near-rank-1 — acoustics can constrain range toward the cluster well but provide almost no lateral observability. DVL prevents velocity drift; acoustics correct range-direction position bias. Spreading the USVs further apart would be the single biggest improvement to positioning accuracy.
 
 ## Dependencies
 
