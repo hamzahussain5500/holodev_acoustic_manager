@@ -72,17 +72,26 @@ results_modem_dropout/<timestamp>_seed<seed>/
 
 ### Plots (in `plots/`)
 
+Each plot is saved as `.png`, `.pdf`, and `.svg`.
+
+- `pos_err_vs_time.png`
+  - position error time series with 10 s rolling median
+  - per-modem dropout swimlanes (one row per acoustic modem) below the main axis
 - `position_error_main.png`
   - raw error and rolling median
-  - dropout shading + per‑phase medians
+  - dropout shading for usv2 and usv4 only + per‑phase medians
 - `position_error_raw.png`
-  - raw error with dropout shading
+  - raw (downsampled) error with dropout shading
 - `position_error_cdf.png`
-  - CDF of error by phase
+  - empirical CDF of position error split by phase (baseline / dropout / overlap)
 - `uncertainty_vs_time.png`
-  - $\sqrt{\mathrm{trace}(P_{pos})}$ over time with dropouts
+  - $\sqrt{\mathrm{trace}(P_{pos})}$ over time with dropout swimlanes
+- `nis_acoustic_vs_time.png`
+  - acoustic NIS time series with 95% chi-squared bounds
+  - gated (skipped) measurements shown as scatter
+  - per-modem dropout shading
 - `xy_traj.png`
-  - ground truth vs EKF estimate (XY)
+  - ground truth vs EKF estimate (XY plane)
 
 ---
 
@@ -138,3 +147,29 @@ At the end of the run the script prints:
 - Trajectories: `trajectory.py`
 - Consistency metrics: `validation_metrics.py`
 - Dropout parsing and plotting: `modem_dropout_test.py`
+
+---
+
+## Validation results (2026-03-31)
+
+Tested with `--seed 0 --duration-sec 60`, three configurations: no dropout, manual schedule `usv2:10-40;usv4:20-50`, and `--use-default-overlaps`.
+
+| Config | RMSE [m] | median err [m] | NEES(pos) mean/dof | Gating used% |
+|---|---|---|---|---|
+| No dropout | 0.372 | 0.308 | 2.88 / 3 = 0.96 | 100% |
+| usv2+usv4 dropout | 0.301 | 0.289 | 2.57 / 3 = 0.86 | 76% |
+| Default overlaps | 0.367 | 0.324 | 2.85 / 3 = 0.95 | 62% |
+
+NEES(pos) mean/dof close to 1.0 indicates a well-calibrated filter. All runs completed without errors.
+
+---
+
+## Known issues fixed (2026-03-31)
+
+### Bug 1: `plot_pos_err()` and `plot_nis()` were never called from `main()`
+
+Both functions were fully implemented but never invoked, so `pos_err_vs_time.png` and `nis_acoustic_vs_time.png` were silently absent from every run. Fixed by adding the calls to `main()`.
+
+### Bug 2: Dead assignment in `build_phase_masks()` (line 166)
+
+The line `overlap = m1 | m2 | m3 | m4` was immediately overwritten by the pairwise-AND expression on the next line. The first assignment was dead code. Removed to prevent confusion about what "overlap" means (it correctly means two or more modems simultaneously down, not any modem down).

@@ -163,7 +163,6 @@ def build_phase_masks(t: np.ndarray, d2: List[Tuple[float, float]], d4: List[Tup
     m3 = np.zeros_like(t, dtype=bool)  # placeholder for dropout3
     m2 = mask_from_intervals(t, d2)
     m4 = mask_from_intervals(t, d4)
-    overlap = m1 | m2 | m3 | m4
     overlap = (m1 & m2) | (m1 & m3) | (m1 & m4) | (m2 & m3) | (m2 & m4) | (m3 & m4)
     d2_only = m2 & (~(m1 | m3 | m4))
     d4_only = m4 & (~(m1 | m2 | m3))
@@ -813,7 +812,9 @@ def main():
         dropout_4=dropout.get("usv4", []),
         out_dir=plots_dir,
     )
+    plot_pos_err(plots_dir, ts, dropout)
     plot_uncertainty(plots_dir, ts, dropout)
+    plot_nis(plots_dir, ts, dropout)
     plot_xy(plots_dir, ts, dropout)
     save_summary(out_dir, trial, dropout, args.duration_sec)
     summarize_results(ts, dropout, args.duration_sec, args.targets)
