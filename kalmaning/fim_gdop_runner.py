@@ -360,13 +360,14 @@ def write_best_subset_csv_2d(result: Dict[str, any], traj: np.ndarray, out_path:
                 if isinstance(cfg_idx, np.ndarray):
                     cfg_idx = tuple(cfg_idx.tolist())
                 rec = cfg_map[cfg_idx]
+                crlb_xy_row = np.asarray(rec.crlb_diags_xy[idx])
                 return [
                     format_cfg(cfg_idx),
                     rec.logdets_xy[idx],
                     rec.gdops_xy[idx],
                     int(rec.ranks_xy[idx]),
-                    rec.crlb_diags_xy[idx][0] if rec.crlb_diags_xy[idx].size >= 1 else math.nan,
-                    rec.crlb_diags_xy[idx][1] if rec.crlb_diags_xy[idx].size >= 2 else math.nan,
+                    float(crlb_xy_row[0]) if crlb_xy_row.size >= 1 else math.nan,
+                    float(crlb_xy_row[1]) if crlb_xy_row.size >= 2 else math.nan,
                 ]
 
             row.extend(append_cfg_metrics(result["best_3_xy"]["idx"][idx]))

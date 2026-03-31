@@ -47,7 +47,7 @@ USV_BEACON_ID_4      = 4
 # Simulation timing
 DEFAULT_TICKS_PER_SEC = 100
 # Default to shorter runs to keep Monte Carlo batches fast; override via config.
-SIM_DURATION_SEC = 300
+SIM_DURATION_SEC = 600
 
 # Gravity in WORLD frame
 GRAVITY_WORLD = np.array([0.0, 0.0, 9.81])
