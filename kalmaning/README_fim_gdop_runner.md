@@ -28,7 +28,7 @@ At a high level, the runner does the following:
    - GDOP: $\sqrt{\mathrm{trace}(F^{-1})}$
    - CRLB standard deviations: $\sqrt{\mathrm{diag}(F^{-1})}$
 
-6. **Track “best” subsets**
+6. **Track "best" subsets**
    - If `--mode logdet`, choose the subset with maximum log‑det.
    - If `--mode gdop`, choose the subset with minimum GDOP.
    - For 2D (XY) mode, only subsets with rank ≥ 2 are eligible.
@@ -132,3 +132,30 @@ Save all per‑configuration time series (larger output):
 - Geometry + metrics: `sbl_geometry.py` (`SBLConfigurationAnalyzer`)
 - Trajectory generation: `trajectory.py`
 - CLI / I/O / plotting: `fim_gdop_runner.py`
+
+## Known issues and validation notes
+
+### Bug fixed (2026-03-31): `AttributeError` in `write_best_subset_csv_2d()`
+
+**Root cause:** In `write_best_subset_csv_2d()` (previously lines 368–369), the code accessed `.size` directly on `rec.crlb_diags_xy[idx]`, assuming it was always a numpy array. However, `SBLConfigurationAnalyzer.analyze_trajectory()` stores `crlb_diags_xy` as a `List[np.ndarray]` by default — only converting to a 2D numpy array when `all_configs_metrics=True` (triggered by `--save-all-configs`). Without the flag, `rec.crlb_diags_xy[idx]` returns a plain Python list, which has no `.size` attribute, causing an `AttributeError` on every normal run.
+
+**Fix:** The row element is now wrapped with `np.asarray()` before accessing `.size`, making the code robust regardless of whether `--save-all-configs` is set.
+
+**Impact:** All runs without `--save-all-configs` were broken for the 2D best-subset CSV output. This affected the default code path.
+
+### Data type behaviour to be aware of
+
+`config_records` values (`ConfigMetrics`) hold list fields by default. When `--save-all-configs` is passed, `analyze_trajectory()` converts them to numpy arrays in-place. Functions that consume `config_records` fields use `np.asarray()` wrappers so they work in both modes.
+
+### Default beacon geometry
+
+The built-in 4-beacon layout spans only ~15 m in x and ~10 m in y at z=0 / z=−10 m:
+
+```
+[  0.0, -660.0,   0.0]
+[ 15.0, -660.0,   0.0]
+[ 10.0, -650.0,   0.0]
+[  0.0, -650.0, -10.0]
+```
+
+This is a very tight, nearly co-planar cluster. The default spiral trajectory (center 200, −200; radii 20–50 m; z from −5 to −150 m) is far from this cluster, so expect near-singular geometry (GDOP → ∞, rank < 3) in default runs. Use `--beacons-csv` to supply a realistic deployment.
