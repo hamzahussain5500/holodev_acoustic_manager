@@ -1,0 +1,199 @@
+{
+  "seed": 0,
+  "pos_rmse_total": 0.36728714596569295,
+  "vel_rmse_total": 0.08509866404041062,
+  "final_position_error": 0.18680666163343085,
+  "runtime_seconds": 11.538353907000783,
+  "dropout_intervals": {
+    "usv1": [
+      [
+        6.0,
+        18.0
+      ],
+      [
+        28.799999999999997,
+        36.0
+      ],
+      [
+        46.800000000000004,
+        49.8
+      ]
+    ],
+    "usv2": [
+      [
+        12.0,
+        24.0
+      ],
+      [
+        31.200000000000003,
+        38.4
+      ],
+      [
+        46.800000000000004,
+        49.8
+      ]
+    ],
+    "usv3": [
+      [
+        16.8,
+        27.0
+      ],
+      [
+        33.6,
+        40.800000000000004
+      ],
+      [
+        46.800000000000004,
+        49.8
+      ]
+    ],
+    "usv4": [
+      [
+        21.599999999999998,
+        31.200000000000003
+      ],
+      [
+        36.0,
+        43.199999999999996
+      ],
+      [
+        46.800000000000004,
+        49.8
+      ]
+    ]
+  },
+  "disabled_seconds": {
+    "usv1": 22.199999999999996,
+    "usv2": 22.19999999999999,
+    "usv3": 20.399999999999995,
+    "usv4": 19.799999999999994
+  },
+  "config": {
+    "use_currents": false,
+    "use_dvl_update": true,
+    "use_depth_update": true,
+    "use_acoustic_updates": true,
+    "enable_dvl": true,
+    "enable_depth": true,
+    "enable_acoustic": true,
+    "use_all_acoustic": false,
+    "acoustic_uncertainty_trace_thresh": null,
+    "acoustic_period_ticks": 30,
+    "dvl_measurement_std": 0.45,
+    "dvl_measurement_std_z": 0.13,
+    "depth_measurement_std": 0.03,
+    "acoustic_measurement_std": 0.3,
+    "dvl_extra_std": 0.0,
+    "depth_extra_std": 0.0,
+    "range_extra_std": 0.0,
+    "imu_accel_extra_std": 0.0,
+    "imu_bias_rw_std": 0.0,
+    "q_pos_std": 0.0,
+    "q_vel_std": 0.3,
+    "p_pos_std_init": 1.0,
+    "p_vel_std_init": 1.0,
+    "waypoint_spacing": 12.5,
+    "trajectory": "spiral",
+    "spiral_center": [
+      200.0,
+      -200.0
+    ],
+    "spiral_min_radius": 20.0,
+    "spiral_max_radius": 50.0,
+    "spiral_turns": 6,
+    "spiral_points_per_rev": 250,
+    "spiral_z_start": -5.0,
+    "spiral_z_end": -150.0,
+    "nees_ds_stride": 0,
+    "nees_ds_alpha": 0.05,
+    "duration_sec": 60.0,
+    "print_trajectory_summary": false,
+    "modem_dropout_intervals": {
+      "usv1": [
+        [
+          6.0,
+          18.0
+        ],
+        [
+          28.799999999999997,
+          36.0
+        ],
+        [
+          46.800000000000004,
+          49.8
+        ]
+      ],
+      "usv2": [
+        [
+          12.0,
+          24.0
+        ],
+        [
+          31.200000000000003,
+          38.4
+        ],
+        [
+          46.800000000000004,
+          49.8
+        ]
+      ],
+      "usv3": [
+        [
+          16.8,
+          27.0
+        ],
+        [
+          33.6,
+          40.800000000000004
+        ],
+        [
+          46.800000000000004,
+          49.8
+        ]
+      ],
+      "usv4": [
+        [
+          21.599999999999998,
+          31.200000000000003
+        ],
+        [
+          36.0,
+          43.199999999999996
+        ],
+        [
+          46.800000000000004,
+          49.8
+        ]
+      ]
+    },
+    "modem_dropout_mode": "ignore_updates",
+    "dt": 0.01,
+    "ticks_per_sec": 100.0
+  },
+  "nees": {
+    "is_consistent": false,
+    "avg_nees": 4.703528273114088,
+    "expected_nees": 6,
+    "lower_bound": 5.91266388956588,
+    "upper_bound": 6.087967543205353,
+    "percent_inside_bounds": 98.8,
+    "per_sample_bounds": [
+      1.2373442457912027,
+      14.44937533544792
+    ],
+    "num_samples": 6000
+  },
+  "nis_acoustic": {
+    "is_consistent": false,
+    "avg_nis": 0.14248979726169117,
+    "expected_nis": 1,
+    "lower_bound": 0.6149882594661588,
+    "upper_bound": 1.477087115483993,
+    "percent_inside_bounds": 95.1219512195122,
+    "per_sample_bounds": [
+      0.0009820691171752555,
+      5.023886187314888
+    ],
+    "num_samples": 41
+  }
+}
