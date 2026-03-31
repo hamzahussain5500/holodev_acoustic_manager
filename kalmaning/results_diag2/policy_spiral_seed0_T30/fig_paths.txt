@@ -1,0 +1,9 @@
+results_diag2/policy_spiral_seed0_T30/fig_active_count.png
+results_diag2/policy_spiral_seed0_T30/fig_active_set.png
+results_diag2/policy_spiral_seed0_T30/fig_pos_err.png
+results_diag2/policy_spiral_seed0_T30/fig_score_vs_time.png
+results_diag2/policy_spiral_seed0_T30/fig_active_count.png
+results_diag2/policy_spiral_seed0_T30/fig_active_set.png
+results_diag2/policy_spiral_seed0_T30/fig_pos_err.png
+results_diag2/policy_spiral_seed0_T30/fig_gdop.png
+results_diag2/policy_spiral_seed0_T30/fig_score_vs_time.png

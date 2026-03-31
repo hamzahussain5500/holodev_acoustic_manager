@@ -1,0 +1,5 @@
+results_test_weighted/policy_spiral_seed0_T180/fig_active_count.png
+results_test_weighted/policy_spiral_seed0_T180/fig_active_set.png
+results_test_weighted/policy_spiral_seed0_T180/fig_pos_err.png
+results_test_weighted/policy_spiral_seed0_T180/fig_score_vs_time.png
+results_test_weighted/policy_spiral_seed0_T180/fig_soc_vs_time.png

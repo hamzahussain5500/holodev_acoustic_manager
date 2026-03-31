@@ -1,0 +1,5 @@
+{
+  "rmse_pos": 0.5386423030444846,
+  "final_pos_err": 1.3176052481607787,
+  "out_dir": "results_test/gdop3/policy_spiral_seed0_T180"
+}

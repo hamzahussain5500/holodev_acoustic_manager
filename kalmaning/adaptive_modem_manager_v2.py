@@ -252,14 +252,16 @@ class AdaptiveModemManagerV2:
         self._last_t: Optional[float] = None
 
         self._acoustics_enabled = True
-        self._current_ids: List[Union[str, int]] = []
+        # Pre-seed with all known beacons so the first evaluation starts from
+        # the full set and can only switch to a subset if it genuinely improves.
+        self._current_ids: List[Union[str, int]] = list(self.beacon_positions.keys())
         self._dwell = 0
         self._last_available: Optional[Tuple[Union[str, int], ...]] = None
         self._gate_dwell = 0
 
     def reset(self) -> None:
         self._acoustics_enabled = True
-        self._current_ids = []
+        self._current_ids = list(self.beacon_positions.keys())
         self._dwell = 0
         self._last_available = None
         self._last_t = None
@@ -544,7 +546,9 @@ class AdaptiveModemManagerV2:
             out_score = best_score
         else:
             self._current_ids = list(cur_subset)
-            self._dwell = 1
+            # Keep dwell at min_dwell_steps so the next call re-evaluates
+            # immediately rather than re-entering the dwell_hold path.
+            self._dwell = self.min_dwell_steps
             reason = "held_margin"
             out_geo = cur_geo
             out_score = cur_score

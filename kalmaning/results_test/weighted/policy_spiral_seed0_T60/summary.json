@@ -1,0 +1,5 @@
+{
+  "rmse_pos": 0.409072487960391,
+  "final_pos_err": 0.2897302299094391,
+  "out_dir": "results_test/weighted/policy_spiral_seed0_T60"
+}

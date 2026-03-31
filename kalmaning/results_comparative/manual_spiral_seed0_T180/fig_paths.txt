@@ -1,0 +1,4 @@
+results_comparative/manual_spiral_seed0_T180/fig_active_count.png
+results_comparative/manual_spiral_seed0_T180/fig_active_set.png
+results_comparative/manual_spiral_seed0_T180/fig_pos_err.png
+results_comparative/manual_spiral_seed0_T180/fig_gdop.png
