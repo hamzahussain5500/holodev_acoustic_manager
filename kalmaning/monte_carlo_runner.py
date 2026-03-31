@@ -226,12 +226,76 @@ def run_consistency_flag(run: Dict[str, Any], percent_threshold: float, avg_band
 
 def _set_style():
     plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
         "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
         "axes.grid": True,
-        "axes.facecolor": "#f8f8f8",
-        "grid.alpha": 0.4,
+        "axes.facecolor": "#ffffff",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "grid.color": "#d9d9d9",
+        "grid.alpha": 0.3,
+        "grid.linewidth": 0.5,
         "font.size": 10,
+        "legend.fontsize": 10,
+        "axes.labelsize": 10,
+        "axes.titlesize": 10,
+        "lines.linewidth": 1.2,
     })
+
+
+ALGO_COLORS: Dict[str, str] = {
+    "imu_dvl_depth": "#1f77b4",
+    "imu_dvl_depth_all4": "#ff7f0e",
+    "imu_dvl_depth_acoustic_all": "#ff7f0e",
+    "adaptive": "#2ca02c",
+}
+
+
+def _algo_color(name: str) -> str:
+    key = str(name).lower()
+    if key in ALGO_COLORS:
+        return ALGO_COLORS[key]
+    if key.startswith("adaptive"):
+        return ALGO_COLORS["adaptive"]
+    return "#1f77b4"
+
+
+def _style_axis(ax: Any, legend_loc: str = "best", show_legend: bool = True) -> None:
+    try:
+        ax.spines[["top", "right"]].set_visible(False)
+    except Exception:
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    ax.grid(True, color="#d9d9d9", alpha=0.3, linewidth=0.5)
+    if show_legend:
+        handles, labels = ax.get_legend_handles_labels()
+        if handles and labels:
+            ax.legend(loc=legend_loc, frameon=False, fontsize=10)
+
+
+def _styled_boxplot(ax: Any, data: List[List[float]], labels: List[str]) -> None:
+    bp = ax.boxplot(
+        data,
+        labels=labels,
+        patch_artist=True,
+        medianprops={"color": "#202020", "linewidth": 1.2},
+        whiskerprops={"color": "#4d4d4d", "linewidth": 1.0},
+        capprops={"color": "#4d4d4d", "linewidth": 1.0},
+        boxprops={"color": "#4d4d4d", "linewidth": 1.0},
+    )
+    for patch, label in zip(bp["boxes"], labels):
+        patch.set_facecolor(_algo_color(label))
+        patch.set_alpha(0.6)
+
+
+def _save_figure(path_hint: Path) -> None:
+    out_pdf = path_hint.with_suffix(".pdf")
+    out_svg = path_hint.with_suffix(".svg")
+    plt.savefig(out_pdf, format="pdf", bbox_inches="tight", dpi=300)
+    plt.savefig(out_svg, format="svg", bbox_inches="tight")
 
 
 def _median_dt(times: np.ndarray) -> float:
@@ -433,24 +497,25 @@ def plot_per_seed(trial: Dict[str, Any], plots_dir: Path) -> None:
     nis_logs = ts.get("nis_logs", {}) or {}
 
     plt.figure(figsize=(6, 4))
-    plt.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=2)
-    plt.plot(est[:, 0], est[:, 1], label="Estimate", lw=1.5)
+    plt.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=1.2, color="#4d4d4d")
+    plt.plot(est[:, 0], est[:, 1], label="Estimate", lw=1.2, color="#1f77b4")
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
     plt.axis("equal")
     plt.title("XY trajectory")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(plots_dir / "traj_xy.png")
+    _save_figure(plots_dir / "traj_xy.png")
     plt.close()
 
     plt.figure(figsize=(6, 3.5))
-    plt.plot(t, err_norm, label="||pos error||", lw=1.5)
-    plt.xlabel("time [s]")
-    plt.ylabel("error [m]")
+    plt.plot(t, err_norm, label="||pos error||", lw=1.2, color="#1f77b4")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Error [m]")
     plt.title("Position error vs time")
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(plots_dir / "pos_err_vs_time.png")
+    _save_figure(plots_dir / "pos_err_vs_time.png")
     plt.close()
 
     if nees_pos is not None:
@@ -461,12 +526,12 @@ def plot_per_seed(trial: Dict[str, Any], plots_dir: Path) -> None:
         hi = chi2.ppf(0.975, dof)
         plt.axhline(lo, color="gray", linestyle="--", linewidth=1, label="95% bounds")
         plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-        plt.xlabel("time [s]")
+        plt.xlabel("Time [s]")
         plt.ylabel("NEES (pos)")
         plt.title("NEES vs time")
-        plt.legend()
+        _style_axis(plt.gca(), legend_loc="best")
         plt.tight_layout()
-        plt.savefig(plots_dir / "nees_vs_time.png")
+        _save_figure(plots_dir / "nees_vs_time.png")
         plt.close()
 
     for key, fname in [("dvl", "nis_dvl_vs_time.png"), ("depth", "nis_depth_vs_time.png"), ("acoustic", "nis_acoustic_vs_time.png")]:
@@ -480,12 +545,12 @@ def plot_per_seed(trial: Dict[str, Any], plots_dir: Path) -> None:
         hi = chi2.ppf(0.975, dof)
         plt.axhline(lo, color="gray", linestyle="--", linewidth=1, label="95% bounds")
         plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-        plt.xlabel("time [s]")
+        plt.xlabel("Time [s]")
         plt.ylabel("NIS")
         plt.title(f"NIS {key} vs time")
-        plt.legend()
+        _style_axis(plt.gca(), legend_loc="best")
         plt.tight_layout()
-        plt.savefig(plots_dir / fname)
+        _save_figure(plots_dir / fname)
         plt.close()
 
 
@@ -498,14 +563,14 @@ def plot_seed_trajectory(trial: Dict[str, Any], out_path: Path) -> None:
     if gt.size == 0:
         return
     plt.figure(figsize=(6, 4))
-    plt.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=2)
+    plt.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=1.2, color="#1f77b4")
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
     plt.axis("equal")
     plt.title("XY trajectory")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_path)
+    _save_figure(out_path)
     plt.close()
 
 
@@ -577,29 +642,31 @@ def aggregate_results(config_name: str, runs: List[Dict[str, Any]], out_dir: Pat
     plt.figure(figsize=(6, 3.5))
     sorted_err = np.sort(final_err)
     cdf = np.linspace(0, 1, sorted_err.size)
-    plt.plot(sorted_err, cdf, lw=1.5, label=config_name)
+    plt.plot(sorted_err, cdf, lw=1.2, label=config_name, color=_algo_color(config_name))
     plt.xlabel("Final position error [m]")
-    plt.ylabel("CDF")
+    plt.ylabel("CDF [1]")
     plt.title("Final error CDF")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "final_error_cdf.png")
+    _save_figure(out_dir / "final_error_cdf.png")
     plt.close()
 
     plt.figure(figsize=(4, 4))
-    plt.boxplot([pos_rmse], labels=["pos_rmse"], patch_artist=True)
+    _styled_boxplot(plt.gca(), [pos_rmse.tolist()], [config_name])
     plt.ylabel("RMSE [m]")
     plt.title("Position RMSE")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "rmse_boxplot.png")
+    _save_figure(out_dir / "rmse_boxplot.png")
     plt.close()
 
     plt.figure(figsize=(4, 4))
-    plt.boxplot([nees_pct], labels=["NEES % inside"], patch_artist=True)
+    _styled_boxplot(plt.gca(), [nees_pct.tolist()], [config_name])
     plt.ylabel("Percent inside gate [%]")
     plt.title("NEES coverage")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "nees_boxplot.png")
+    _save_figure(out_dir / "nees_boxplot.png")
     plt.close()
 
     # Mean NEES over time (optional)
@@ -610,17 +677,17 @@ def aggregate_results(config_name: str, runs: List[Dict[str, Any]], out_dir: Pat
             t_ref = ok_runs[0]["timeseries"]["t"][:min_len]
             mean_nees = np.nanmean(nees_stack, axis=0)
             plt.figure(figsize=(6, 3.5))
-            plt.plot(t_ref, mean_nees, lw=1.5, label="Mean NEES pos")
+            plt.plot(t_ref, mean_nees, lw=1.2, label="Mean NEES pos", color="#1f77b4")
             lo = chi2.ppf(0.025, 3)
             hi = chi2.ppf(0.975, 3)
             plt.axhline(lo, color="gray", linestyle="--", linewidth=1, label="95% bounds")
             plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-            plt.xlabel("time [s]")
+            plt.xlabel("Time [s]")
             plt.ylabel("NEES (pos)")
             plt.title("Mean NEES over time")
-            plt.legend()
+            _style_axis(plt.gca(), legend_loc="best")
             plt.tight_layout()
-            plt.savefig(out_dir / "mean_nees_over_time.png")
+            _save_figure(out_dir / "mean_nees_over_time.png")
             plt.close()
 
 
@@ -637,13 +704,13 @@ def compare_configs(results_by_config: Dict[str, List[Dict[str, Any]]], out_root
             continue
         final_err = np.sort([r["final_position_error"] for r in ok_runs])
         cdf = np.linspace(0, 1, final_err.size)
-        plt.plot(final_err, cdf, lw=1.5, label=name)
+        plt.plot(final_err, cdf, lw=1.2, label=name, color=_algo_color(name))
     plt.xlabel("Final position error [m]")
-    plt.ylabel("CDF")
+    plt.ylabel("CDF [1]")
     plt.title("Final error CDF (configs)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "final_error_cdf_overlay.png")
+    _save_figure(out_dir / "final_error_cdf_overlay.png")
     plt.close()
 
     plt.figure(figsize=(5, 4))
@@ -656,11 +723,12 @@ def compare_configs(results_by_config: Dict[str, List[Dict[str, Any]]], out_root
         data.append([r["pos_rmse_total"] for r in ok_runs])
         labels.append(name)
     if data:
-        plt.boxplot(data, labels=labels, patch_artist=True)
+        _styled_boxplot(plt.gca(), data, labels)
         plt.ylabel("Position RMSE [m]")
         plt.title("RMSE by config")
+        _style_axis(plt.gca(), show_legend=False)
         plt.tight_layout()
-        plt.savefig(out_dir / "rmse_boxplot_overlay.png")
+        _save_figure(out_dir / "rmse_boxplot_overlay.png")
         plt.close()
 
 
@@ -1001,23 +1069,23 @@ def make_results_readme(out_dir: Path, args: argparse.Namespace) -> None:
 - algorithms: {', '.join(args.algorithms)}
 
 ## Figures
-- final_error_cdf_overlay.png: CDF of final position error across algorithms.
-- rmse_boxplot_overlay.png: RMSE distribution across algorithms.
-- energy_boxplot.png: Acoustic energy distribution across algorithms.
-- energy_vs_error.png: Energy vs final error scatter.
-- mean_nees_pos.png: Mean NEES over time with 95% bounds.
-- mean_nis_acoustic.png: Mean acoustic NIS over time (when applicable).
-- pos_error_vs_time_ci.png: Position error vs time with 95% CI.
-- nees_vs_time_ci.png: NEES vs time with 95% CI and bounds.
-- nis_acoustic_vs_time_ci.png: Acoustic NIS vs time with 95% CI and bounds.
-- active_count_vs_time_ci.png: Active beacon count vs time with 95% CI.
-- soc_vs_time_ci.png: SOC vs time with 95% CI.
-- energy_vs_time_ci.png: Energy vs time with 95% CI.
-- gdop_vs_time_ci.png: GDOP vs time (adaptive policies).
-- fim_logdet_vs_time_ci.png: FIM logdet vs time (adaptive policies).
-- rmse_vs_crlb.png: RMSE vs CRLB efficiency scatter.
-- active_count_hist_adaptive.png: % time in each active-beacon count.
-- switches_hist_adaptive.png: Switching events per run.
+- final_error_cdf_overlay.pdf: CDF of final position error across algorithms.
+- rmse_boxplot_overlay.pdf: RMSE distribution across algorithms.
+- energy_boxplot.pdf: Acoustic energy distribution across algorithms.
+- energy_vs_error.pdf: Energy vs final error scatter.
+- mean_nees_pos.pdf: Mean NEES over time with 95% bounds.
+- mean_nis_acoustic.pdf: Mean acoustic NIS over time (when applicable).
+- pos_error_vs_time_ci.pdf: Position error vs time with 95% CI.
+- nees_vs_time_ci.pdf: NEES vs time with 95% CI and bounds.
+- nis_acoustic_vs_time_ci.pdf: Acoustic NIS vs time with 95% CI and bounds.
+- active_count_vs_time_ci.pdf: Active beacon count vs time with 95% CI.
+- soc_vs_time_ci.pdf: SOC vs time with 95% CI.
+- energy_vs_time_ci.pdf: Energy vs time with 95% CI.
+- gdop_vs_time_ci.pdf: GDOP vs time (adaptive policies).
+- fim_logdet_vs_time_ci.pdf: FIM logdet vs time (adaptive policies).
+- rmse_vs_crlb.pdf: RMSE vs CRLB efficiency scatter.
+- active_count_hist_adaptive.pdf: % time in each active-beacon count.
+- switches_hist_adaptive.pdf: Switching events per run.
 
 ## Metrics to cite
 - mean/median final position error
@@ -1037,13 +1105,13 @@ def plot_cdf_overlay(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir: 
             continue
         vals = np.sort(vals)
         cdf = np.linspace(0, 1, vals.size)
-        plt.plot(vals, cdf, lw=1.5, label=name)
+        plt.plot(vals, cdf, lw=1.2, label=name, color=_algo_color(name))
     plt.xlabel("Final position error [m]")
-    plt.ylabel("CDF")
+    plt.ylabel("CDF [1]")
     plt.title("Final error CDF")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "final_error_cdf_overlay.png")
+    _save_figure(out_dir / "final_error_cdf_overlay.png")
     plt.close()
 
 
@@ -1058,11 +1126,12 @@ def plot_rmse_boxplot(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir:
     if not data:
         return
     plt.figure(figsize=(5, 4))
-    plt.boxplot(data, labels=labels, patch_artist=True)
+    _styled_boxplot(plt.gca(), data, labels)
     plt.ylabel("Position RMSE [m]")
     plt.title("RMSE by algorithm")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "rmse_boxplot_overlay.png")
+    _save_figure(out_dir / "rmse_boxplot_overlay.png")
     plt.close()
 
 
@@ -1077,11 +1146,12 @@ def plot_energy_boxplot(results_by_algo: Dict[str, List[Dict[str, Any]]], out_di
     if not data:
         return
     plt.figure(figsize=(5, 4))
-    plt.boxplot(data, labels=labels, patch_artist=True)
+    _styled_boxplot(plt.gca(), data, labels)
     plt.ylabel("Energy [Wh]")
     plt.title("Acoustic energy by algorithm")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "energy_boxplot.png")
+    _save_figure(out_dir / "energy_boxplot.png")
     plt.close()
 
 
@@ -1091,13 +1161,13 @@ def plot_energy_vs_error(results_by_algo: Dict[str, List[Dict[str, Any]]], out_d
         x = [r["energy_Wh"] for r in runs]
         y = [r["final_error"] for r in runs]
         if x and y:
-            plt.scatter(x, y, label=name, alpha=0.7)
+            plt.scatter(x, y, label=name, alpha=0.7, color=_algo_color(name), edgecolor="white", linewidth=0.5)
     plt.xlabel("Energy [Wh]")
     plt.ylabel("Final error [m]")
     plt.title("Energy vs accuracy")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "energy_vs_error.png")
+    _save_figure(out_dir / "energy_vs_error.png")
     plt.close()
 
 
@@ -1111,17 +1181,17 @@ def plot_mean_nees(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir: Pa
         stack = np.stack([s[:min_len] for s in series])
         mean_nees = np.nanmean(stack, axis=0)
         t = runs[0]["t_series"][:min_len]
-        plt.plot(t, mean_nees, label=name)
+        plt.plot(t, mean_nees, label=name, lw=1.2, color=_algo_color(name))
     lo = chi2.ppf(0.025, 3)
     hi = chi2.ppf(0.975, 3)
     plt.axhline(lo, color="gray", linestyle="--", linewidth=1)
     plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("NEES (pos)")
     plt.title("Mean NEES (pos)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "mean_nees_pos.png")
+    _save_figure(out_dir / "mean_nees_pos.png")
     plt.close()
 
 
@@ -1135,13 +1205,13 @@ def plot_mean_nis_acoustic(results_by_algo: Dict[str, List[Dict[str, Any]]], out
         stack = np.stack([s[:min_len] for s in series])
         mean_nis = np.nanmean(stack, axis=0)
         t = runs[0]["t_series"][:min_len]
-        plt.plot(t, mean_nis, label=name)
-    plt.xlabel("time [s]")
+        plt.plot(t, mean_nis, label=name, lw=1.2, color=_algo_color(name))
+    plt.xlabel("Time [s]")
     plt.ylabel("NIS (acoustic)")
     plt.title("Mean acoustic NIS")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "mean_nis_acoustic.png")
+    _save_figure(out_dir / "mean_nis_acoustic.png")
     plt.close()
 
 
@@ -1155,14 +1225,14 @@ def plot_error_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]], out_
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("Position error [m]")
     plt.title("Position error vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "pos_error_vs_time_ci.png")
+    _save_figure(out_dir / "pos_error_vs_time_ci.png")
     plt.close()
 
 
@@ -1176,19 +1246,19 @@ def plot_nees_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]], out_d
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
     dof = 3
     lo = chi2.ppf(0.025, dof)
     hi = chi2.ppf(0.975, dof)
     plt.axhline(lo, color="gray", linestyle="--", linewidth=1)
     plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("NEES (pos)")
     plt.title("NEES vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "nees_vs_time_ci.png")
+    _save_figure(out_dir / "nees_vs_time_ci.png")
     plt.close()
 
 
@@ -1203,7 +1273,7 @@ def plot_nis_acoustic_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
         plotted = True
     if not plotted:
@@ -1222,12 +1292,12 @@ def plot_nis_acoustic_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]
     hi = chi2.ppf(0.975, dof)
     plt.axhline(lo, color="gray", linestyle="--", linewidth=1)
     plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("NIS (acoustic)")
     plt.title("Acoustic NIS vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "nis_acoustic_vs_time_ci.png")
+    _save_figure(out_dir / "nis_acoustic_vs_time_ci.png")
     plt.close()
 
 
@@ -1241,14 +1311,14 @@ def plot_active_count_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], 
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("Active beacons")
     plt.title("Active beacon count vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "active_count_vs_time_ci.png")
+    _save_figure(out_dir / "active_count_vs_time_ci.png")
     plt.close()
 
 
@@ -1271,14 +1341,14 @@ def plot_soc_energy_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
         soc_stack = np.stack([s[:min_len] for s in soc_series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(soc_stack)
-        plt.plot(t, mean, label=f"{name} SOC")
+        plt.plot(t, mean, label=f"{name} SOC", lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
-    plt.xlabel("time [s]")
-    plt.ylabel("SOC")
+    plt.xlabel("Time [s]")
+    plt.ylabel("SOC [1]")
     plt.title("SOC vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "soc_vs_time_ci.png")
+    _save_figure(out_dir / "soc_vs_time_ci.png")
     plt.close()
 
     plt.figure(figsize=(6, 3.5))
@@ -1297,14 +1367,14 @@ def plot_soc_energy_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
         energy_stack = np.stack([s[:min_len] for s in energy_series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(energy_stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("Energy [Wh]")
     plt.title("Energy vs time (mean ± 95% CI)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "energy_vs_time_ci.png")
+    _save_figure(out_dir / "energy_vs_time_ci.png")
     plt.close()
 
 
@@ -1321,17 +1391,17 @@ def plot_gdop_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir:
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
         plotted = True
     if not plotted:
         return
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("GDOP (xy)")
     plt.title("GDOP vs time (adaptive policies)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "gdop_vs_time_ci.png")
+    _save_figure(out_dir / "gdop_vs_time_ci.png")
     plt.close()
 
 
@@ -1354,17 +1424,17 @@ def plot_fim_logdet_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
         stack = np.stack([s[:min_len] for s in series])
         t = runs[0]["t_series"][:min_len]
         mean, lo, hi = _mean_ci(stack)
-        plt.plot(t, mean, label=name)
+        plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
         plotted = True
     if not plotted:
         return
-    plt.xlabel("time [s]")
+    plt.xlabel("Time [s]")
     plt.ylabel("FIM logdet")
     plt.title("FIM logdet vs time (adaptive policies)")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "fim_logdet_vs_time_ci.png")
+    _save_figure(out_dir / "fim_logdet_vs_time_ci.png")
     plt.close()
 
 
@@ -1380,16 +1450,16 @@ def plot_rmse_vs_crlb(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir:
             xs.append(float(r.get("crlb_eff")))
             ys.append(float(r.get("pos_rmse")))
         if xs and ys:
-            plt.scatter(xs, ys, label=name, alpha=0.7)
+            plt.scatter(xs, ys, label=name, alpha=0.7, color=_algo_color(name), edgecolor="white", linewidth=0.5)
             plotted = True
     if not plotted:
         return
-    plt.xlabel("RMSE / CRLB")
+    plt.xlabel(r"$RMSE/CRLB$ [1]")
     plt.ylabel("Position RMSE [m]")
     plt.title("RMSE vs CRLB efficiency")
-    plt.legend()
+    _style_axis(plt.gca(), legend_loc="best")
     plt.tight_layout()
-    plt.savefig(out_dir / "rmse_vs_crlb.png")
+    _save_figure(out_dir / "rmse_vs_crlb.png")
     plt.close()
 
 
@@ -1399,22 +1469,24 @@ def plot_adaptive_telemetry(rows: List[Dict[str, Any]], out_dir: Path) -> None:
     pct_cols = ["pct_active_0", "pct_active_1", "pct_active_2", "pct_active_3", "pct_active_4"]
     avg_pct = [float(np.mean([r[c] for r in rows])) for c in pct_cols]
     plt.figure(figsize=(5, 3.5))
-    plt.bar([0, 1, 2, 3, 4], avg_pct)
+    plt.bar([0, 1, 2, 3, 4], avg_pct, color=_algo_color("adaptive"), alpha=0.6)
     plt.xlabel("Active beacons")
-    plt.ylabel("% time")
+    plt.ylabel("Time share [%]")
     plt.title("Adaptive: % time by active beacons")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "active_count_hist_adaptive.png")
+    _save_figure(out_dir / "active_count_hist_adaptive.png")
     plt.close()
 
     switches = [r["switch_count"] for r in rows]
     plt.figure(figsize=(5, 3.5))
-    plt.hist(switches, bins=max(3, min(10, len(switches))))
+    plt.hist(switches, bins=max(3, min(10, len(switches))), color=_algo_color("adaptive"), alpha=0.6)
     plt.xlabel("Switches per run")
-    plt.ylabel("count")
+    plt.ylabel("Count [1]")
     plt.title("Adaptive switching count")
+    _style_axis(plt.gca(), show_legend=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "switches_hist_adaptive.png")
+    _save_figure(out_dir / "switches_hist_adaptive.png")
     plt.close()
 
 

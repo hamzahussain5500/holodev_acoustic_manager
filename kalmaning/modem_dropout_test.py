@@ -23,16 +23,21 @@ if os.environ.get("MPLBACKEND") is None:
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import chi2
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 from current_acoustic_EKF_patched import run_single_trial
 
 
 COLORS = {
-    "usv1": "#1f77b4",
-    "usv2": "#ff7f0e",
-    "usv3": "#2ca02c",
-    "usv4": "#d62728",
+    # Journal-grade muted palette (Matplotlib/Tableau tab10 core)
+    "usv1": "#1F77B4",  # steel blue
+    "usv2": "#FF7F0E",  # safety orange
+    "usv3": "#2CA02C",  # forest green
+    "usv4": "#D62728",  # brick red
 }
+
+MODEM_ORDER = ["usv1", "usv2", "usv3", "usv4"]
 
 DISPLAY_NAMES = {
     "usv1": "Acoustic 1",
@@ -309,16 +314,16 @@ def make_error_plots(t_sec: np.ndarray, pos_err: np.ndarray, dropout_2: List[Tup
     ds_t, ds_err = downsample_for_plot(t, err, target_hz=5.0)
 
     # Main plot with smoothing
-    fig1 = plt.figure(figsize=(8, 4.5))
+    fig1 = plt.figure(figsize=(8.4, 4.6))
     ax1 = fig1.gca()
-    ax1.plot(ds_t, ds_err, color="tab:blue", alpha=0.5, lw=1.2, label="pos err (raw, downsampled)")
-    ax1.plot(t, med, color="tab:red", lw=1.4, label="rolling median (10 s)")
+    ax1.plot(ds_t, ds_err, color="#4C72B0", alpha=0.28, lw=0.9, label="Position error (downsampled)")
+    ax1.plot(t, med, color="#222222", lw=1.3, label="Rolling median (10 s)")
 
     def shade(ax, intervals, label, color):
         seen = set()
         for (a, b) in intervals:
             lbl = label if label not in seen else None
-            ax.axvspan(a, b, color=color, alpha=0.12, label=lbl)
+            ax.axvspan(a, b, color=color, alpha=0.10, label=lbl)
             seen.add(label)
 
     shade(ax1, d2, "dropout 2", COLORS.get("usv2", "gray"))
@@ -334,28 +339,30 @@ def make_error_plots(t_sec: np.ndarray, pos_err: np.ndarray, dropout_2: List[Tup
         median_lines[phase_name] = float(np.median(vals))
         ax1.hlines(median_lines[phase_name], x_min, x_max, linestyle="--", linewidth=1.1, label=f"median {phase_name}")
 
-    ax1.set_xlabel("time [s]")
-    ax1.set_ylabel("position error [m]")
+    ax1.set_xlabel("Time [s]")
+    ax1.set_ylabel("Position error [m]")
     ax1.set_title("Position error with rolling median")
+    _style_axes(ax1, grid=True)
     ax1.legend()
     fig1.tight_layout()
-    fig1.savefig(Path(out_dir) / "position_error_main.png", dpi=300)
+    _save_pub_figure(fig1, Path(out_dir) / "position_error_main.png")
 
     # Raw plot (downsampled only)
-    fig2 = plt.figure(figsize=(8, 4.0))
+    fig2 = plt.figure(figsize=(8.4, 4.2))
     ax2 = fig2.gca()
-    ax2.plot(ds_t, ds_err, color="tab:blue", lw=1.2, label="pos err (raw, downsampled)")
+    ax2.plot(ds_t, ds_err, color="#4C72B0", lw=0.95, alpha=0.9, label="Position error (downsampled)")
     shade(ax2, d2, "dropout 2", COLORS.get("usv2", "gray"))
     shade(ax2, d4, "dropout 4", COLORS.get("usv4", "silver"))
-    ax2.set_xlabel("time [s]")
-    ax2.set_ylabel("position error [m]")
+    ax2.set_xlabel("Time [s]")
+    ax2.set_ylabel("Position error [m]")
     ax2.set_title("Position error (raw)")
+    _style_axes(ax2, grid=True)
     ax2.legend()
     fig2.tight_layout()
-    fig2.savefig(Path(out_dir) / "position_error_raw.png", dpi=300)
+    _save_pub_figure(fig2, Path(out_dir) / "position_error_raw.png")
 
     # CDF plot
-    fig3 = plt.figure(figsize=(6, 4.5))
+    fig3 = plt.figure(figsize=(6.2, 4.5))
     ax3 = fig3.gca()
 
     def add_cdf(name: str, mask: np.ndarray, color: str):
@@ -378,12 +385,13 @@ def make_error_plots(t_sec: np.ndarray, pos_err: np.ndarray, dropout_2: List[Tup
     for phase, mask in phases.items():
         add_cdf(phase, mask, colors.get(phase, None) or None)
 
-    ax3.set_xlabel("position error [m]")
+    ax3.set_xlabel("Position error [m]")
     ax3.set_ylabel("empirical CDF")
     ax3.set_title("Position error CDF by phase")
+    _style_axes(ax3, grid=True)
     ax3.legend()
     fig3.tight_layout()
-    fig3.savefig(Path(out_dir) / "position_error_cdf.png", dpi=300)
+    _save_pub_figure(fig3, Path(out_dir) / "position_error_cdf.png")
 
     # Print stats
     def print_stats(label: str, mask: np.ndarray):
@@ -419,12 +427,104 @@ def is_enabled(dropout: Dict[str, List[Tuple[float, float]]], name: str, t_sec: 
 
 def _set_style():
     plt.rcParams.update({
-        "figure.dpi": 300,
+        "figure.dpi": 140,
+        "savefig.dpi": 300,
         "axes.grid": True,
-        "axes.facecolor": "#f8f8f8",
-        "grid.alpha": 0.4,
+        "axes.facecolor": "white",
+        "axes.edgecolor": "#444444",
+        "axes.linewidth": 0.8,
+        "grid.alpha": 1.0,
+        "grid.color": "#E5E5E5",
+        "grid.linewidth": 0.6,
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
         "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": "#d0d0d0",
     })
+
+
+def _style_axes(ax, grid: bool = True):
+    if grid:
+        ax.grid(True, which="major", color="#E5E5E5", linewidth=0.6)
+    else:
+        ax.grid(False)
+    # Modern academic look: remove top/right spines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(0.8)
+    ax.spines["bottom"].set_linewidth(0.8)
+    ax.spines["left"].set_color("#444444")
+    ax.spines["bottom"].set_color("#444444")
+
+
+def _save_pub_figure(fig: plt.Figure, out_path: Path):
+    """Save raster + vector copies for publication workflows."""
+    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path.with_suffix(".pdf"))
+    fig.savefig(out_path.with_suffix(".svg"))
+
+
+def _apply_dropout_shading(ax, dropout: Dict[str, List[Tuple[float, float]]], alpha: float = 0.12):
+    """Shade dropout windows and return one legend handle per modem."""
+    legend_handles = []
+    for name in sorted(dropout.keys()):
+        spans = dropout.get(name, [])
+        if not spans:
+            continue
+        color = COLORS.get(name, "gray")
+        for a, b in spans:
+            ax.axvspan(a, b, color=color, alpha=alpha, lw=0)
+        legend_handles.append(Patch(facecolor=color, edgecolor=color, alpha=alpha,
+                                    label=f"{pretty_name(name)} dropout"))
+    return legend_handles
+
+
+def _finalize_timeseries_axis(ax, t: np.ndarray):
+    if t.size:
+        ax.set_xlim(float(t.min()), float(t.max()))
+    _style_axes(ax, grid=True)
+
+
+def _add_dropout_swimlanes(ax, t: np.ndarray, dropout: Dict[str, List[Tuple[float, float]]]):
+    """Draw compact dropout swimlanes (one row per modem) without overlap ambiguity."""
+    names = [n for n in MODEM_ORDER if n in DISPLAY_NAMES]
+    n = len(names)
+
+    for i, name in enumerate(names):
+        # Thin bars improve data-to-ink ratio for publication figures
+        lane_h = 0.30
+        y0 = i + 0.5 - lane_h / 2.0
+        intervals = merge_intervals(dropout.get(name, []))
+        xranges = [(float(a), float(max(0.0, b - a))) for a, b in intervals if b > a]
+        if xranges:
+            ax.broken_barh(
+                xranges,
+                (y0, lane_h),
+                facecolors=COLORS.get(name, "gray"),
+                edgecolors="none",
+                alpha=0.70,
+            )
+
+    if t.size:
+        ax.set_xlim(float(t.min()), float(t.max()))
+    ax.set_ylim(0, n)
+    ax.set_yticks([i + 0.5 for i in range(n)])
+    ax.set_yticklabels([pretty_name(nm) for nm in names])
+    ax.invert_yaxis()  # Acoustic 1 at top
+    ax.set_ylabel("Dropout")
+    _style_axes(ax, grid=False)
+    ax.set_facecolor("white")
+
+    # Color labels to match lane colors
+    for tick, name in zip(ax.get_yticklabels(), names):
+        tick.set_color(COLORS.get(name, "black"))
 
 
 def write_timeseries_csv(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]]) -> None:
@@ -486,43 +586,61 @@ def write_timeseries_csv(path: Path, ts: Dict[str, Any], dropout: Dict[str, List
             writer.writerow(row)
 
 
-def _shade(ax, dropout: Dict[str, List[Tuple[float, float]]]):
-    for name, spans in dropout.items():
-        color = COLORS.get(name, "gray")
-        for a, b in spans:
-            ax.axvspan(a, b, color=color, alpha=0.15, label=f"{pretty_name(name)} dropout")
-
-
 def plot_pos_err(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]]):
-    t = ts["t"]
-    err = ts["err_norm"]
-    plt.figure(figsize=(7, 4))
-    plt.plot(t, err, lw=1.5, label="||pos error||")
-    _shade(plt.gca(), dropout)
-    plt.xlabel("time [s]")
-    plt.ylabel("error [m]")
-    plt.title("Position error vs time")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path / "pos_err_vs_time.png")
-    plt.close()
+    t = np.asarray(ts["t"], dtype=float)
+    err = np.asarray(ts["err_norm"], dtype=float)
+    med = rolling_median_time(t, err, window_sec=10.0)
+
+    fig, (ax, ax_lane) = plt.subplots(
+        2, 1,
+        figsize=(10.5, 6.2),
+        sharex=True,
+        gridspec_kw={"height_ratios": [6.0, 1.2], "hspace": 0.05},
+    )
+    ax.plot(t, err, lw=0.9, alpha=0.30, color="#4C72B0", label="Position error")
+    ax.plot(t, med, lw=1.4, color="#222222", label="Rolling median (10 s)")
+
+    ax.set_ylabel("Position error [m]")
+    ax.set_title("Position error over time")
+    _finalize_timeseries_axis(ax, t)
+    ax.tick_params(axis="x", labelbottom=False)
+
+    ax.legend(loc="upper right")
+
+    _add_dropout_swimlanes(ax_lane, t, dropout)
+    ax_lane.set_xlabel("Time [s]")
+
+    fig.tight_layout()
+    _save_pub_figure(fig, path / "pos_err_vs_time.png")
+    plt.close(fig)
 
 
 def plot_uncertainty(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]]):
-    t = ts["t"]
-    Ppos = ts["Ppos"]
+    t = np.asarray(ts["t"], dtype=float)
+    Ppos = np.asarray(ts["Ppos"], dtype=float)
     traceP = np.einsum("nii->n", Ppos)
     sig = np.sqrt(np.maximum(traceP, 0.0))
-    plt.figure(figsize=(7, 4))
-    plt.plot(t, sig, lw=1.5, label="sqrt(trace(Ppos)")
-    _shade(plt.gca(), dropout)
-    plt.xlabel("time [s]")
-    plt.ylabel("uncertainty [m]")
-    plt.title("Position uncertainty proxy")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path / "uncertainty_vs_time.png")
-    plt.close()
+
+    fig, (ax, ax_lane) = plt.subplots(
+        2, 1,
+        figsize=(10.5, 6.2),
+        sharex=True,
+        gridspec_kw={"height_ratios": [6.0, 1.2], "hspace": 0.05},
+    )
+    ax.plot(t, sig, lw=1.3, color="#1F77B4", label=r"$\sqrt{\mathrm{tr}(P_{pos})}$")
+
+    ax.set_ylabel("Uncertainty [m]")
+    ax.set_title("Position uncertainty with modem dropout timeline")
+    _finalize_timeseries_axis(ax, t)
+    ax.tick_params(axis="x", labelbottom=False)
+    ax.legend(loc="upper right")
+
+    _add_dropout_swimlanes(ax_lane, t, dropout)
+    ax_lane.set_xlabel("Time [s]")
+
+    fig.tight_layout()
+    _save_pub_figure(fig, path / "uncertainty_vs_time.png")
+    plt.close(fig)
 
 
 def plot_nis(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]]):
@@ -532,39 +650,44 @@ def plot_nis(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float
     skip_t = nis_logs.get("acoustic_skipped", {}).get("t", [])
     skip_v = nis_logs.get("acoustic_skipped", {}).get("values", [])
 
-    plt.figure(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(10.5, 5.2))
     if used_t:
-        plt.plot(used_t, used_v, lw=1.2, label="NIS acoustic (used)")
+        ax.plot(used_t, used_v, lw=1.1, label="Acoustic NIS (used)", color="#1F77B4")
     if skip_t:
-        plt.scatter(skip_t, skip_v, s=12, alpha=0.5, label="NIS acoustic (skipped)", color="gray")
+        ax.scatter(skip_t, skip_v, s=12, alpha=0.45, label="Acoustic NIS (skipped)", color="#7f7f7f")
     lo = chi2.ppf(0.025, 1)
     hi = chi2.ppf(0.975, 1)
-    plt.axhline(lo, color="gray", linestyle="--", linewidth=1, label="95% bounds")
-    plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
-    _shade(plt.gca(), dropout)
-    plt.xlabel("time [s]")
-    plt.ylabel("NIS")
-    plt.title("Acoustic NIS vs time")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path / "nis_acoustic_vs_time.png")
-    plt.close()
+    ax.axhline(lo, color="black", linestyle="--", linewidth=1.1, label="95% consistency bounds")
+    ax.axhline(hi, color="black", linestyle="--", linewidth=1.1)
+    dropout_handles = _apply_dropout_shading(ax, dropout)
+
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("NIS")
+    ax.set_title("Acoustic NIS over time")
+    _finalize_timeseries_axis(ax, np.asarray(used_t if used_t else skip_t, dtype=float))
+
+    base_handles, base_labels = ax.get_legend_handles_labels()
+    ax.legend(handles=base_handles + dropout_handles, loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0.0)
+    fig.tight_layout(rect=[0, 0, 0.80, 1])
+    _save_pub_figure(fig, path / "nis_acoustic_vs_time.png")
+    plt.close(fig)
 
 
 def plot_xy(path: Path, ts: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]]):
     gt = ts["true_pos"]
     est = ts["est_pos"]
-    plt.figure(figsize=(6, 6))
-    plt.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=2)
-    plt.plot(est[:, 0], est[:, 1], label="Estimate", lw=1.5)
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.axis("equal")
-    plt.title("XY trajectory")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path / "xy_traj.png")
-    plt.close()
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot(gt[:, 0], gt[:, 1], label="Ground truth", lw=1.3, color="#222222")
+    ax.plot(est[:, 0], est[:, 1], label="Estimate", lw=1.1, color="#1F77B4")
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.axis("equal")
+    ax.set_title("XY trajectory")
+    ax.legend()
+    _style_axes(ax, grid=True)
+    fig.tight_layout()
+    _save_pub_figure(fig, path / "xy_traj.png")
+    plt.close(fig)
 
 
 def save_summary(path: Path, trial: Dict[str, Any], dropout: Dict[str, List[Tuple[float, float]]], duration: float):

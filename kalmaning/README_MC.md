@@ -2,6 +2,16 @@
 
 This guide explains what happens inside the Monte Carlo runner, how data flows through the EKF, and how to run experiments using the YAML configuration workflow.
 
+## Quick note (updated)
+
+The default [mc_config.yaml](mc_config.yaml) in this folder is now set to a **balanced baseline profile**:
+- stable switching (`min_dwell_sec=3`, `switch_margin=0.1`)
+- realistic uncertainty targets (`target_unc_xy=5`, `target_unc_3d=8`)
+- moderate energy pressure (`energy_weight=0.1`, `base_drain_w=5`, `beacon_drain_w=6`)
+
+For full key-by-key explanations and additional profiles, use:
+- [README_MC_YAML_GUIDE.md](README_MC_YAML_GUIDE.md)
+
 ## What the Monte Carlo runner does (high-level)
 
 `monte_carlo_runner.py` repeatedly runs the EKF simulation under controlled random seeds and aggregates performance metrics.
@@ -85,6 +95,11 @@ Only these CLI flags remain (CLI always overrides YAML):
 
 All other settings are loaded from `mc_config.yaml`.
 
+### Important caveat
+
+In the new pipeline (`run_mc_new()`), trajectory inside `run_trial()` is currently fixed to spiral.
+So changing a trajectory field in YAML will not affect new-mode runs unless `run_trial()` is updated.
+
 ### Example config: `mc_config.yaml`
 
 Key settings include:
@@ -93,6 +108,16 @@ Key settings include:
 - sensor noise and random stream stds
 - energy model (`battery_wh`, `base_drain_w`, `beacon_drain_w`)
 - adaptive policy parameters (`min_dwell_sec`, `switch_margin`, etc.)
+
+### Recommended profile for first serious run
+
+Use the current default [mc_config.yaml](mc_config.yaml), then run:
+
+```bash
+/usr/bin/python monte_carlo_runner.py --outdir results_monte_carlo/spiral_balanced --duration 60 --runs 30 --max-workers 4
+```
+
+Then increase to `--runs 50` (or explicit fixed seeds) for publication tables.
 
 ## How to run (examples)
 
