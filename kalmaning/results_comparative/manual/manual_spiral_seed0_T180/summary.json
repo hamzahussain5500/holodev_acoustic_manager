@@ -1,5 +1,5 @@
 {
-  "rmse_pos": 0.3588538541789468,
-  "final_pos_err": 0.3877114175593336,
+  "rmse_pos": 0.8627690386982999,
+  "final_pos_err": 1.7130214316597363,
   "out_dir": "results_comparative/manual/manual_spiral_seed0_T180"
 }

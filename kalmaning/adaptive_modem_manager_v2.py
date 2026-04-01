@@ -210,6 +210,10 @@ class AdaptiveModemManagerV2:
         energy_weight_low_power_mult: float = 2.0,
         size_penalty_low_power_mult: float = 2.0,
         rank_deficit_penalty_low_power_mult: float = 1.0,
+        # Only allow 0-beacon in subset scoring when SOC <= this threshold.
+        # When SOC is high, 0-beacon is only reachable via the uncertainty gate.
+        # Set to 1.0 to always allow 0-beacon in scoring (original behavior).
+        score_zero_below_soc: float = 0.0,
     ) -> None:
         self.beacon_positions = {k: np.asarray(v, dtype=float).reshape(3,) for k, v in beacon_positions.items()}
         self.sigma_r = float(sigma_r)
@@ -237,6 +241,7 @@ class AdaptiveModemManagerV2:
         self.energy_weight_low_power_mult = float(energy_weight_low_power_mult)
         self.size_penalty_low_power_mult = float(size_penalty_low_power_mult)
         self.rank_deficit_penalty_low_power_mult = float(rank_deficit_penalty_low_power_mult)
+        self.score_zero_below_soc = float(score_zero_below_soc)
         if battery_wh > 0.0 and self.energy_weight > 0.0:
             self.energy = EnergyModel(
                 base_drain_w=base_drain_w,
@@ -299,6 +304,17 @@ class AdaptiveModemManagerV2:
             on = on_mult * target_unc
             return off, on, True
         return self.gate_off_threshold, self.gate_on_threshold, False
+
+    def _enumerate_subsets_from(self, ids: List[Union[str, int]], min_size: int) -> List[List[Union[str, int]]]:
+        n = len(ids)
+        max_k = self.max_subset_size if self.max_subset_size is not None else n
+        max_k = min(max_k, n)
+        min_k = max(0, min_size)
+        out: List[List[Union[str, int]]] = []
+        for k in range(min_k, max_k + 1):
+            for combo in combinations(ids, k):
+                out.append(list(combo))
+        return out
 
     def _enumerate_subsets(self, ids: List[Union[str, int]]) -> List[List[Union[str, int]]]:
         n = len(ids)
@@ -436,7 +452,8 @@ class AdaptiveModemManagerV2:
                 rank_now = geo["rank_3d"]
 
             tr_post = _posterior_cov_trace(Psub, H, self.sigma_r)
-            deficit = max(0, target_rank - int(rank_now))
+            # 0-beacon is an intentional acoustics-off state; exempt from rank deficit penalty.
+            deficit = 0 if not subset else max(0, target_rank - int(rank_now))
             energy_penalty = 0.0
             size_pen = self.size_penalty
             energy_w = self.energy_weight
@@ -464,7 +481,12 @@ class AdaptiveModemManagerV2:
             return subset, metrics
 
         # evaluate all candidates (0..N)
-        candidates = self._enumerate_subsets(avail)
+        # 0-beacon is only included in scoring when SOC is below score_zero_below_soc.
+        # When SOC is high, the uncertainty gate is the sole mechanism for acoustics-off.
+        soc_now = self.energy.soc if self.energy is not None else 1.0
+        allow_zero_in_scoring = (self.min_subset_size == 0) and (soc_now <= self.score_zero_below_soc)
+        eff_min_size = 0 if allow_zero_in_scoring else max(1, self.min_subset_size)
+        candidates = self._enumerate_subsets_from(avail, eff_min_size)
 
         best_subset: List[Union[str, int]] = []
         best_score = float("inf")
@@ -482,7 +504,8 @@ class AdaptiveModemManagerV2:
                 rank_now = geo["rank_3d"]
 
             tr_post = _posterior_cov_trace(Psub, H, self.sigma_r)
-            deficit = max(0, target_rank - int(rank_now))
+            # Rank deficit penalty is zero for the intentional 0-beacon (acoustics-off) case.
+            deficit = 0 if not subset else max(0, target_rank - int(rank_now))
             energy_penalty = 0.0
             size_pen = self.size_penalty
             energy_w = self.energy_weight
@@ -523,7 +546,7 @@ class AdaptiveModemManagerV2:
             rank_c = cur_geo["rank_3d"]
 
         tr_c = _posterior_cov_trace(Psub, Hc, self.sigma_r)
-        deficit_c = max(0, target_rank - int(rank_c))
+        deficit_c = 0 if not cur_subset else max(0, target_rank - int(rank_c))
         energy_penalty_c = 0.0
         size_pen_c = self.size_penalty
         energy_w_c = self.energy_weight
@@ -541,6 +564,8 @@ class AdaptiveModemManagerV2:
         if (best_score + self.switch_margin) < cur_score:
             self._current_ids = list(best_subset)
             self._dwell = 0
+            # Reset gate dwell so the uncertainty gate can't fire immediately after a switch.
+            self._gate_dwell = 0
             reason = "switched"
             out_geo = best_geo
             out_score = best_score

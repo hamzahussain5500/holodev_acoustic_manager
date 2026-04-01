@@ -19,8 +19,8 @@ cd "$(dirname "$0")"
 
 OUTDIR="results_comparative"
 TRAJ="spiral"
-DURATION=600
-SEED=1
+DURATION=180
+SEED=0
 
 # ── Shared geometry parameters ────────────────────────────────────────────────
 SIGMA_R=0.5          # range noise std (m) — matches EKF acoustic_measurement_std
@@ -52,7 +52,7 @@ python3 modem_switching_validation_fixed.py \
   --mode manual \
   --traj "$TRAJ" --duration "$DURATION" --seed "$SEED" \
   --targets usv1 usv2 usv3 usv4 \
-  --dropout usv4:45-180 usv3:90-180 usv2:135-180 \
+  --dropout "usv4:45-180" "usv3:90-180" "usv2:135-180" \
   --sigma-r "$SIGMA_R" \
   --make-plots
 
@@ -81,7 +81,12 @@ python3 modem_switching_validation_fixed.py \
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. WEIGHTED POLICY — multi-objective with phase schedule
-# Phases: survey (0-45s) → cruise (45-90s) → transit (90-135s) → low_power (135-180s)
+# Phases: survey (0-60s, obs-dominant → n=4) → transit (60-120s, energy-dominant → n=2)
+#         → low_power (120-180s, max energy conservation → n=0 at battery depletion)
+# Phase weights calibrated for near-degenerate SBL geometry (see README):
+#   survey:    (0.85, 0.08, 0.07)  — w_obs/w_energy > 4.2 needed for n=4 to beat n=2
+#   transit:   (0.25, 0.60, 0.15)  — energy-dominant; n=2 wins clearly
+#   low_power: (0.15, 0.75, 0.10)  — maximum energy conservation until battery depletion
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [3/4] Weighted policy (multi-objective + phase schedule) ---"
@@ -93,10 +98,10 @@ python3 modem_switching_validation_fixed.py \
   --sigma-r "$SIGMA_R" \
   --gdop-xy "$GDOP_XY" --gdop-3d "$GDOP_3D" \
   --min-beacons-xy 2 --min-beacons-3d 3 \
-  --min-dwell-sec 8.0 \
-  --score-margin 0.02 \
-  --power-save-tol 0.03 \
-  --phase-schedule "survey:0-45,cruise:45-90,transit:90-135,low_power:135-180" \
+  --min-dwell-sec 10.0 \
+  --score-margin 0.03 \
+  --power-save-tol 0.0 \
+  --phase-schedule "survey:0-60,transit:60-120,low_power:120-180" \
   --target-unc-xy 0.5 --target-unc-3d 0.8 \
   --off-unc-mult 1.5 \
   --allow-zero-beacons \
@@ -108,8 +113,15 @@ python3 modem_switching_validation_fixed.py \
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. V2 POLICY — posterior covariance approximation
-# Shows: 4→2 (energy-driven) + 2→0 (uncertainty gated off) + 0→2 (re-enabled)
-# Parameters tuned for the near-degenerate SBL geometry (18m cluster at ~450m range).
+# Shows 4+ clean switching events combining three distinct mechanisms:
+#   1. Energy-driven subset reduction (4→2 at t~15s, energy_weight drives it)
+#   2. Uncertainty gate-off (2→0 when sqrt(trace(Pxy)) < off_unc_mult × target_unc_xy)
+#   3. Uncertainty drift re-enable (0→2 when estimate drifts above on_threshold)
+#   4. Energy-based gate-off at low SOC (2→0 via score_zero_below_soc scoring)
+# Key parameters for near-degenerate SBL geometry (18m cluster at ~450m range):
+#   off_unc_mult=0.55 → off_threshold = 0.55×1.5 = 0.825m (gates off when well-converged)
+#   score_zero_below_soc=0.4 → 0-beacon enters scoring when SOC ≤ 0.4 (energy-off at end)
+#   gate reset on subset switch → prevents immediate re-gating after a switch
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [4/4] V2 policy (posterior covariance approximation) ---"
@@ -122,19 +134,20 @@ python3 modem_switching_validation_fixed.py \
   --min-beacons-xy 0 --min-beacons-3d 0 \
   --allow-zero-beacons \
   --gdop-xy "$GDOP_XY" --gdop-3d "$GDOP_3D" \
-  --min-dwell-sec 10.0 \
+  --min-dwell-sec 15.0 \
   --switch-margin 0.005 \
   --size-penalty 0.0 \
-  --target-unc-xy 1.2 --target-unc-3d 1.5 \
-  --off-unc-mult 0.9 \
+  --target-unc-xy 1.5 --target-unc-3d 2.0 \
+  --off-unc-mult 0.55 \
   --battery-wh "$BAT_WH" --base-drain-w "$BASE_W" --beacon-drain-w "$BEACON_W" \
   --drain-scale "$DRAIN_SCALE" --soc-init "$SOC_INIT" --soc-min "$SOC_MIN" \
   --energy-weight 0.195 \
-  --v2-low-power-soc 0.55 \
-  --v2-energy-mult 4.0 \
+  --v2-low-power-soc 0.45 \
+  --v2-energy-mult 5.0 \
   --v2-size-penalty-mult 1.0 \
   --v2-rank-deficit-penalty 5.0 \
   --v2-rank-deficit-mult 0.5 \
+  --v2-score-zero-below-soc 0.4 \
   --make-plots
 
 # ─────────────────────────────────────────────────────────────────────────────
