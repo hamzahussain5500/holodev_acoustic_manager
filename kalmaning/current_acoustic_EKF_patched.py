@@ -1,6 +1,7 @@
 import holoocean
 import numpy as np
 import time
+from collections import deque
 import argparse
 import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Optional, Tuple
@@ -725,15 +726,15 @@ def run_ekf_acoustics(
 
         max_history_ticks = max(1, int(float(cfg.get("acoustic_rewind_buffer_sec", 10.0)) * ticks_per_sec))
         history_by_tick: Dict[int, Dict[str, Any]] = {}
-        history_tick_order: List[int] = []
+        history_tick_order: deque = deque(maxlen=max_history_ticks)
 
         def _put_tick_history(record: Dict[str, Any]) -> None:
             t = int(record["tick"])
+            if len(history_tick_order) == max_history_ticks:
+                old = history_tick_order[0]
+                history_by_tick.pop(old, None)
             history_by_tick[t] = record
             history_tick_order.append(t)
-            while len(history_tick_order) > max_history_ticks:
-                old = history_tick_order.pop(0)
-                history_by_tick.pop(old, None)
 
         def _replay_from_oosm(
             obs_tick: int,
@@ -1486,7 +1487,6 @@ def run_single_trial(
 ):
     """Run one EKF simulation with reproducible seed and collect metrics."""
 
-    np.random.seed(seed)
     rng = np.random.default_rng(seed)
 
     base_config: Dict[str, Any] = {

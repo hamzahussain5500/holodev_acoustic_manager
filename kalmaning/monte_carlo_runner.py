@@ -358,9 +358,10 @@ def _stack_series(series_list: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray
     series_list = [s for s in series_list if s is not None and len(s) > 0]
     if not series_list:
         return np.asarray([]), np.asarray([])
-    min_len = min(len(s) for s in series_list)
-    stack = np.stack([s[:min_len] for s in series_list])
-    return stack, np.asarray(range(min_len))
+    max_len = max(len(s) for s in series_list)
+    padded = [np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series_list]
+    stack = np.stack(padded)
+    return stack, np.asarray(range(max_len))
 
 
 def compute_crlb_efficiency(trial: Dict[str, Any]) -> float:
@@ -401,7 +402,7 @@ def compute_soc_energy_series(times: np.ndarray, active_count: np.ndarray, args:
     if args.battery_wh <= 0:
         return np.full_like(energy_wh, soc[0], dtype=float), energy_wh
     for i in range(1, energy_wh.size):
-        dsoc = (power[i - 1] * dt[i - 1]) / (args.battery_wh * 3600.0)
+        dsoc = (power[i] * dt[i]) / (args.battery_wh * 3600.0)
         soc[i] = max(float(args.soc_min), min(1.0, soc[i - 1] - args.drain_scale * dsoc))
     return soc, energy_wh
 
@@ -1021,8 +1022,8 @@ def compute_energy_metrics(trial: Dict[str, Any], args: argparse.Namespace, algo
     if algorithm == "imu_dvl_depth_all4":
         if times.size < 2:
             return 0.0
-        dt = _median_dt(times)
-        return float((args.base_drain_w + args.beacon_drain_w * 4.0) * times.size * dt / 3600.0)
+        all4_count = np.full(times.size, 4.0)
+        return _energy_from_active_count(times, all4_count, args.base_drain_w, args.beacon_drain_w)
 
     active_count = np.asarray(ts.get("active_count", []), dtype=float)
     if active_count.size == 0 and "selector_meta" in trial:
@@ -1177,13 +1178,15 @@ def plot_mean_nees(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir: Pa
         series = [r["nees_pos_series"] for r in runs if r.get("nees_pos_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
         mean_nees = np.nanmean(stack, axis=0)
-        t = runs[0]["t_series"][:min_len]
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         plt.plot(t, mean_nees, label=name, lw=1.2, color=_algo_color(name))
-    lo = chi2.ppf(0.025, 3)
-    hi = chi2.ppf(0.975, 3)
+    n_runs_total = sum(len(v) for v in results_by_algo.values())
+    lo = chi2.ppf(0.025, 3 * max(n_runs_total, 1)) / max(n_runs_total, 1)
+    hi = chi2.ppf(0.975, 3 * max(n_runs_total, 1)) / max(n_runs_total, 1)
     plt.axhline(lo, color="gray", linestyle="--", linewidth=1)
     plt.axhline(hi, color="gray", linestyle="--", linewidth=1)
     plt.xlabel("Time [s]")
@@ -1201,10 +1204,11 @@ def plot_mean_nis_acoustic(results_by_algo: Dict[str, List[Dict[str, Any]]], out
         series = [r["nis_ac_series"] for r in runs if r.get("nis_ac_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
         mean_nis = np.nanmean(stack, axis=0)
-        t = runs[0]["t_series"][:min_len]
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         plt.plot(t, mean_nis, label=name, lw=1.2, color=_algo_color(name))
     plt.xlabel("Time [s]")
     plt.ylabel("NIS (acoustic)")
@@ -1221,9 +1225,10 @@ def plot_error_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]], out_
         series = [r["err_series"] for r in runs if r.get("err_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1242,9 +1247,10 @@ def plot_nees_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]], out_d
         series = [r["nees_pos_series"] for r in runs if r.get("nees_pos_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1269,9 +1275,10 @@ def plot_nis_acoustic_vs_time_ci(results_by_algo: Dict[str, List[Dict[str, Any]]
         series = [r["nis_ac_series"] for r in runs if r.get("nis_ac_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1307,9 +1314,10 @@ def plot_active_count_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], 
         series = [r["active_count"] for r in runs if r.get("active_count") is not None and len(r["active_count"]) > 0]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1337,9 +1345,10 @@ def plot_soc_energy_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
             energy_series.append(energy)
         if not soc_series:
             continue
-        min_len = min(len(s) for s in soc_series)
-        soc_stack = np.stack([s[:min_len] for s in soc_series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in soc_series)
+        soc_stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in soc_series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(soc_stack)
         plt.plot(t, mean, label=f"{name} SOC", lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1363,9 +1372,10 @@ def plot_soc_energy_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
             energy_series.append(energy)
         if not energy_series:
             continue
-        min_len = min(len(s) for s in energy_series)
-        energy_stack = np.stack([s[:min_len] for s in energy_series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in energy_series)
+        energy_stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in energy_series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(energy_stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1387,9 +1397,10 @@ def plot_gdop_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], out_dir:
         series = [r["gdop_xy_series"] for r in runs if r.get("gdop_xy_series") is not None]
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
@@ -1420,9 +1431,10 @@ def plot_fim_logdet_vs_time(results_by_algo: Dict[str, List[Dict[str, Any]]], ou
             series.append(series_from_selector_meta(t, meta, "fim_logdet"))
         if not series:
             continue
-        min_len = min(len(s) for s in series)
-        stack = np.stack([s[:min_len] for s in series])
-        t = runs[0]["t_series"][:min_len]
+        max_len = max(len(s) for s in series)
+        stack = np.stack([np.concatenate([s, np.full(max_len - len(s), np.nan)]) for s in series])
+        t_run = max(runs, key=lambda r: len(r.get("t_series", [])))
+        t = t_run["t_series"][:max_len]
         mean, lo, hi = _mean_ci(stack)
         plt.plot(t, mean, label=name, lw=1.2, color=_algo_color(name))
         plt.fill_between(t, lo, hi, alpha=0.2)
