@@ -468,10 +468,15 @@ class WeightedParams:
 
 
 DEFAULT_PHASE_WEIGHTS = {
-    "survey": (0.6, 0.2, 0.2),
-    "cruise": (0.5, 0.3, 0.2),
-    "transit": (0.3, 0.5, 0.2),
-    "low_power": (0.2, 0.7, 0.1),
+    # survey:    observability-dominant. w_obs/w_energy > 4.2 required for n=4 to win
+    #            in near-degenerate SBL geometry (logdet gap ~0.09 normalized units).
+    # cruise:    balanced; n=4 still wins (obs slightly dominant).
+    # transit:   energy-dominant; n=2 wins over n=4 (energy margin outweighs obs gain).
+    # low_power: maximum energy conservation; n=2 holds until battery depletes.
+    "survey":    (0.85, 0.08, 0.07),
+    "cruise":    (0.60, 0.25, 0.15),
+    "transit":   (0.25, 0.60, 0.15),
+    "low_power": (0.15, 0.75, 0.10),
 }
 
 
@@ -927,6 +932,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--v2-size-penalty-mult", type=float, default=3.0, help="(v2) Size penalty multiplier when SOC is low.")
     ap.add_argument("--v2-rank-deficit-mult", type=float, default=1.0, help="(v2) Rank deficit penalty multiplier when SOC is low (use <1 to allow 1-beacon).")
     ap.add_argument("--v2-rank-deficit-penalty", type=float, default=5.0, help="(v2) Base rank deficit penalty. Lower values (3-5) allow 1-beacon subsets when beneficial.")
+    ap.add_argument("--v2-score-zero-below-soc", type=float, default=0.0, help="(v2) Include 0-beacon in subset scoring only when SOC <= this threshold. When SOC is above this, only the uncertainty gate can turn acoustics off. Set to e.g. 0.3 to allow energy-driven acoustics-off at low SOC.")
 
     # Allow 0..4 / 1-beacon behavior
     ap.add_argument("--min-beacons-xy", type=int, default=2, help="Minimum beacons when depth is available (XY geometry).")
@@ -1112,6 +1118,7 @@ def main():
                             energy_weight_low_power_mult=float(args.v2_energy_mult),
                             size_penalty_low_power_mult=float(args.v2_size_penalty_mult),
                             rank_deficit_penalty_low_power_mult=float(args.v2_rank_deficit_mult),
+                            score_zero_below_soc=float(args.v2_score_zero_below_soc),
                         )
 
                     P_use = covariance

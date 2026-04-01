@@ -236,7 +236,7 @@ Pre-seeded with all beacons active so the first evaluation compares the full set
 
 ---
 
-## Bug fixes (2026-03-31)
+## Bug fixes (2026-03-31 → 2026-04-01)
 
 Three bugs were found and fixed that prevented the policies from showing active switching.
 
@@ -317,6 +317,77 @@ energy_size_mult: float = 3.0  # size_penalty multiplier in low-power phase
 ```
 
 Battery parameters are now forwarded from the CLI to `PolicyParams` when `--policy-type gdop` is used.
+
+### Bug 5 — V2: rank deficit penalty incorrectly applied to 0-beacon subset
+
+**File:** `adaptive_modem_manager_v2.py`, `select()` — dwell_hold score, candidate loop, and cur_score computation (3 locations).
+
+**Symptom:** The 0-beacon (acoustics-off) subset has rank=0, so `deficit = max(0, target_rank - 0) = 2`. With `rank_deficit_penalty=5.0`, this adds `5.0 × 2 = 10.0` to the 0-beacon score, inflating it from ~1.72 to ~11.77. This made 0-beacon permanently non-competitive, blocking all acoustics-off states that the uncertainty gate would otherwise produce. After the gate itself fired, `held_margin` would immediately re-enable the prior beacon set because the 0-beacon "score" in the comparison was always ≫ the 2-beacon score.
+
+**Before (all 3 locations):**
+```python
+deficit = max(0, target_rank - int(rank_now))
+```
+
+**After (all 3 locations):**
+```python
+# 0-beacon is intentional acoustics-off; exempt from rank deficit penalty
+deficit = 0 if not subset else max(0, target_rank - int(rank_now))
+```
+
+### Bug 6 — V2: 0-beacon won immediately in subset scoring after rank deficit fix
+
+**File:** `adaptive_modem_manager_v2.py`, `select()`.
+
+**Symptom:** After fixing the rank deficit bug, the 0-beacon subset scored ~1.72 vs 2-beacon ~1.84 at any SOC. So 0-beacon won continuously in the scoring path, causing rapid on/off oscillation every ~15s (one dwell cycle).
+
+**Fix:** Added `score_zero_below_soc` parameter. The 0-beacon subset is only included in candidate scoring when `SOC ≤ score_zero_below_soc`. Above that threshold, only the uncertainty gate can turn acoustics off. This separates two distinct mechanisms: gate-based off (precision-driven) and energy-based off (depletion-driven).
+
+```python
+# New parameter in __init__:
+score_zero_below_soc: float = 0.0,
+
+# In select(), candidate enumeration:
+soc_now = self.energy.soc if self.energy is not None else 1.0
+allow_zero_in_scoring = (self.min_subset_size == 0) and (soc_now <= self.score_zero_below_soc)
+eff_min_size = 0 if allow_zero_in_scoring else max(1, self.min_subset_size)
+candidates = self._enumerate_subsets_from(avail, eff_min_size)
+```
+
+### Bug 7 — V2: uncertainty gate fired immediately after subset switch
+
+**File:** `adaptive_modem_manager_v2.py`, `select()`, switch branch.
+
+**Symptom:** When the 4→2 switch fired at t~15s, the `_gate_dwell` counter had already accumulated 1500 steps (15s) from t=0 (the EKF converged early, so `unc_value < off_threshold` was true from the start). The `_gate_dwell` reset in the dwell_hold branch only fires during dwell-hold, not on subset switches. So after the switch, the gate immediately fired (0-step dwell) causing 2→0 within one second.
+
+**Fix:** Reset `_gate_dwell = 0` in the switch branch, forcing the gate to wait a full `gate_min_dwell_steps` period before it can fire after any subset change.
+
+```python
+if (best_score + self.switch_margin) < cur_score:
+    self._current_ids = list(best_subset)
+    self._dwell = 0
+    self._gate_dwell = 0  # NEW: prevent immediate re-gating after subset switch
+    reason = "switched"
+```
+
+### Enhancement — Weighted policy: updated DEFAULT_PHASE_WEIGHTS for n=4 survey selection
+
+**File:** `modem_switching_validation_fixed.py`, `DEFAULT_PHASE_WEIGHTS`.
+
+**Problem:** With old survey weights `(0.6, 0.2, 0.2)`, the ratio `w_obs/w_energy = 3.0` was below the analytically-derived threshold of 4.2 needed for n=4 to beat n=2 in near-degenerate SBL geometry (where all subsets have nearly equal geometry). The policy would start at n=3 instead of n=4.
+
+**Analysis:** In near-degenerate geometry, the energy margin advantage of n=2 over n=4 is `~0.375` (normalized), while the observation quality gap is only `~0.09`. For n=4 to win in survey phase: `w_obs × 0.09 > w_energy × 0.375`, requiring `w_obs/w_energy > 4.17`.
+
+**Fix:** Updated survey weights to `(0.85, 0.08, 0.07)`, giving `w_obs/w_energy = 10.6 >> 4.2`. Also added `--v2-score-zero-below-soc` CLI argument.
+
+```python
+DEFAULT_PHASE_WEIGHTS = {
+    "survey":    (0.85, 0.08, 0.07),  # w_obs/w_energy=10.6 → n=4 wins
+    "cruise":    (0.60, 0.25, 0.15),
+    "transit":   (0.25, 0.60, 0.15),  # energy-dominant → n=2 wins
+    "low_power": (0.15, 0.75, 0.10),  # maximum energy conservation
+}
+```
 
 ---
 
@@ -400,6 +471,7 @@ Battery parameters are now forwarded from the CLI to `PolicyParams` when `--poli
 | `--v2-size-penalty-mult` | `1.0` | Size penalty multiplier in low-power phase |
 | `--v2-rank-deficit-penalty` | `5.0` | Base rank deficit penalty |
 | `--v2-rank-deficit-mult` | `0.5` | Rank deficit multiplier in low-power phase |
+| `--v2-score-zero-below-soc` | `0.0` | Include 0-beacon in subset scoring only when SOC ≤ this value; otherwise only uncertainty gate can turn acoustics off |
 
 ---
 
@@ -482,10 +554,10 @@ python3 modem_switching_validation_fixed.py \
   --sigma-r 0.5 \
   --gdop-xy 8.0 --gdop-3d 10.0 \
   --min-beacons-xy 2 --min-beacons-3d 3 \
-  --min-dwell-sec 8.0 \
-  --score-margin 0.02 \
-  --power-save-tol 0.05 \
-  --phase-schedule "survey:0-45,cruise:45-90,transit:90-135,low_power:135-180" \
+  --min-dwell-sec 10.0 \
+  --score-margin 0.03 \
+  --power-save-tol 0.0 \
+  --phase-schedule "survey:0-60,transit:60-120,low_power:120-180" \
   --target-unc-xy 0.5 --target-unc-3d 0.8 \
   --off-unc-mult 1.5 \
   --allow-zero-beacons \
@@ -498,15 +570,22 @@ python3 modem_switching_validation_fixed.py \
 
 Expected output:
 ```
-[selector] t=0.01s   active=['usv1','usv2','usv4'] (initial)
-[selector] t=90.00s  active ['usv1','usv2','usv4'] -> ['usv2','usv4']
-[WARN]     t=99.02s  SOC=0.300 below low_power threshold (0.300)
-[WARN]     t=144.02s SOC=0.050 below minimum threshold (0.050)
-[selector] t=144.03s active ['usv2','usv4'] -> []
-RMSE ≈ 0.627 m
+[selector] t=0.01s   active=['usv1','usv2','usv3','usv4'] (initial)
+[selector] t=60.00s  active ['usv1','usv2','usv3','usv4'] -> ['usv2','usv4']
+[WARN]     t=135.02s SOC=0.050 below minimum threshold (0.050)
+[selector] t=135.03s active ['usv2','usv4'] -> []
+RMSE ≈ 1.02 m
 ```
 
-The 3→2 switch at t=90s is phase-driven (transit phase raises energy weight from 0.3 to 0.5). Battery depletion at t=144s forces acoustics off.
+Two switching events:
+- **t=60s: 4→2** (survey→transit phase boundary; energy weight rises from 0.08 to 0.60, making 2-beacon the winning subset)
+- **t=135s: 2→0** (battery fully depleted at SOC=soc_min)
+
+**Parameter rationale:**
+- Survey weights `(0.85, 0.08, 0.07)`: `w_obs/w_energy = 10.6 >> 4.2` threshold needed for n=4 to beat n=2 in near-degenerate geometry
+- Transit weights `(0.25, 0.60, 0.15)`: energy-dominant; 2-beacon wins clearly
+- `score_margin=0.03`: blocks minor score fluctuations from causing upward switches in low_power phase
+- The 3-phase schedule (survey/transit/low_power) instead of 4-phase (survey/cruise/transit/low_power) prevents n=3 intermediate states; in near-degenerate geometry the n=3 window requires `2.88 < w_obs/w_energy < 2.97`, an impractically tight band
 
 ---
 
@@ -522,35 +601,38 @@ python3 modem_switching_validation_fixed.py \
   --min-beacons-xy 0 --min-beacons-3d 0 \
   --allow-zero-beacons \
   --gdop-xy 8.0 --gdop-3d 10.0 \
-  --min-dwell-sec 10.0 \
+  --min-dwell-sec 15.0 \
   --switch-margin 0.005 \
   --size-penalty 0.0 \
-  --target-unc-xy 1.2 --target-unc-3d 1.5 \
-  --off-unc-mult 0.9 \
+  --target-unc-xy 1.5 --target-unc-3d 2.0 \
+  --off-unc-mult 0.55 \
   --battery-wh 10.0 --base-drain-w 4.0 --beacon-drain-w 3.0 \
   --drain-scale 20.0 --soc-init 1.0 --soc-min 0.05 \
   --energy-weight 0.195 \
-  --v2-low-power-soc 0.55 \
-  --v2-energy-mult 4.0 \
+  --v2-low-power-soc 0.45 \
+  --v2-energy-mult 5.0 \
   --v2-size-penalty-mult 1.0 \
   --v2-rank-deficit-penalty 5.0 \
   --v2-rank-deficit-mult 0.5 \
+  --v2-score-zero-below-soc 0.4 \
   --make-plots
 ```
 
 Expected output:
 ```
-[selector] t=0.01s  active=['usv1','usv2','usv3','usv4'] (initial)
-[selector] t=10.01s active ['usv1','usv2','usv3','usv4'] -> ['usv2','usv4']
-[selector] t=10.97s active ['usv2','usv4'] -> []
-[selector] t=65.76s active [] -> ['usv2','usv4']
-RMSE ≈ 0.478 m
+[selector] t=0.01s   active=['usv1','usv2','usv3','usv4'] (initial)
+[selector] t=15.01s  active ['usv1','usv2','usv3','usv4'] -> ['usv2','usv4']
+[selector] t=99.00s  active ['usv2','usv4'] -> []
+[selector] t=138.00s active [] -> ['usv2','usv4']
+[selector] t=153.00s active ['usv2','usv4'] -> []
+RMSE ≈ 1.29 m
 ```
 
-Three switching events:
-- **t=10s: 4→2** (energy-driven: `energy_weight=0.195` analytically chosen above the threshold where 2-beacon wins vs 4-beacon in near-degenerate geometry)
-- **t=11s: 2→0** (uncertainty gated off: EKF has converged; `sqrt(trace(P_xy)) < 0.9 × 1.2 = 1.08 m`)
-- **t=66s: 0→2** (uncertainty drifted above on-threshold `≈ 1.35 m`; acoustics re-enabled)
+Four switching events:
+1. **t=15s: 4→2** (energy-driven: `energy_weight=0.195` drives 2-beacon after one dwell period; `min_dwell_sec=15s`)
+2. **t=99s: 2→0** (uncertainty gate fires: EKF well-converged after prolonged 2-beacon operation; `sqrt(trace(P_xy)) < 0.55 × 1.5 = 0.825 m`)
+3. **t=138s: 0→2** (uncertainty drifted above on-threshold `≈ 1.031 m`; EKF diverged while running open-loop)
+4. **t=153s: 2→0** (energy-based off: `SOC ≤ score_zero_below_soc=0.4` admits 0-beacon into scoring; combined with `v2_low_power_soc=0.45` + `v2_energy_mult=5.0` raises energy penalty sharply)
 
 **Parameter rationale for V2:**
 
@@ -559,9 +641,17 @@ The near-degenerate SBL geometry (18 m beacon cluster at ~450 m AUV range) means
 | Factor | Value | Effect |
 |--------|-------|--------|
 | `switch_margin=0.005` | ~5× smaller than `tr_post` diff | Allows geometry differences to trigger switches |
-| `energy_weight=0.195` | Below 4→3 threshold (~0.198) | Energy drives 4→2 but not 4→3 |
-| `off_unc_mult=0.9` | off_thresh = 1.08 m | Gates off once EKF xy std < 1.08 m |
-| `on_unc_mult` (auto) | on_thresh = 1.35 m | Re-enables when estimate drifts |
+| `energy_weight=0.195` | Below 4→3 threshold (~0.198) | Energy drives 4→2 but not 4→3 (skips n=3) |
+| `off_unc_mult=0.55` | off_thresh = 0.825 m | Gates off once EKF xy std drops well below target |
+| `on_unc_mult` (auto) | on_thresh ≈ 1.031 m | Re-enables when estimate drifts |
+| `score_zero_below_soc=0.4` | — | Separates gate-based off (precision) from energy-based off (depletion) |
+| `gate_min_dwell_steps=1500` | = min_dwell_sec × 100 Hz | Prevents gate from firing immediately after a subset switch |
+
+**How the three mechanisms interact:**
+
+- **Energy mechanism** (t=15s): The 2-beacon score beats 4-beacon when `energy_weight × Δpower_norm > Δtr_post`, which happens after `min_dwell_sec=15s` of stable 4-beacon operation.
+- **Uncertainty gate** (t=99s, t=138s): Runs on the EKF covariance directly. `_gate_dwell` must accumulate `gate_min_dwell_steps=1500` consecutive below-threshold steps before firing. After every subset switch, `_gate_dwell` resets to 0, so the gate cannot fire immediately.
+- **Energy-based off** (t=153s): When `SOC ≤ 0.4`, the 0-beacon subset enters scoring. With `v2_energy_mult=5.0` active (SOC ≤ 0.45), the 0-beacon energy penalty (0.0) beats the 2-beacon penalty strongly enough to trigger a switch.
 
 ---
 
@@ -643,16 +733,20 @@ Energy: 10 Wh battery, P_base=4 W, P_beacon=3 W, drain_scale=20
 
 | Policy | RMSE (m) | Switches | Active-set counts | Switch events |
 |--------|----------|----------|-------------------|---------------|
-| **Manual** | 1.200 | 3 | {1, 2, 3, 4} | t=45s: 4→3, t=90s: 3→2, t=135s: 2→1 |
-| **GDOP** | 0.962 | 1 | {2, 3} | t=55s: 3→2 (energy, SOC=0.60) |
-| **Weighted** | 0.627 | 2 | {0, 2, 3} | t=90s: 3→2 (phase), t=144s: 2→0 (battery) |
-| **V2** | **0.478** | 3 | {0, 2, 4} | t=10s: 4→2 (energy), t=11s: 2→0 (gate), t=66s: 0→2 (drift) |
+| **Manual** | 0.863 | 3 | {1, 2, 3, 4} | t=45s: 4→3, t=90s: 3→2, t=135s: 2→1 |
+| **GDOP** | 0.792 | 1 | {2, 3} | t=55s: 3→2 (energy, SOC=0.60) |
+| **Weighted** | 1.017 | 2 | {0, 2, 4} | t=60s: 4→2 (phase), t=135s: 2→0 (battery) |
+| **V2** | 1.287 | **4** | {0, 2, 4} | t=15s: 4→2 (energy), t=99s: 2→0 (gate), t=138s: 0→2 (drift), t=153s: 2→0 (energy) |
+
+Validated scenario: `--traj spiral --duration 180 --seed 0`, 18 m SBL cluster at ~450 m range, 10 Wh battery.
 
 **Key observations:**
 
-- V2 achieves the lowest RMSE (0.478 m) by using uncertainty gating to avoid unnecessary acoustic updates once the EKF has converged, and re-enabling them only when the estimate drifts.
-- Weighted policy shows clean phase-driven behavior: high-accuracy survey phase gives way to energy-saving transit/low_power phases.
-- GDOP policy demonstrates the energy-triggered geometry reduction: the minimum-GDOP subset (3 beacons at this geometry) holds until SOC drops to 0.6, at which point the tripled size penalty makes 2 beacons the optimal choice.
-- Manual baseline confirms that staged dropout degrades RMSE monotonically as beacons are removed without any feedback from the navigation state.
+- V2 demonstrates the richest switching behavior: 4 distinct events driven by 3 independent mechanisms (energy scoring, uncertainty gate, energy-based off at low SOC). It is the only policy that autonomously re-enables acoustics after a gate-off event.
+- Weighted policy now starts at n=4 (survey phase, `w_obs/w_energy=10.6`) and cleanly transitions to n=2 at the survey→transit boundary (t=60s), then off at battery depletion.
+- GDOP shows a single energy-triggered switch (3→2 at SOC=0.60) as designed.
+- Manual baseline provides the staged-dropout control: deterministic 4→3→2→1 with no navigation feedback.
+- Higher RMSE for V2 and Weighted reflects periods with 0 active beacons (EKF runs open-loop); Manual and GDOP keep at least 2 beacons active throughout.
+- The uncertainty gate in V2 achieves genuine energy savings: acoustics are off for ~39s (t=99s to t=138s), with the EKF relying on DVL+IMU+depth only.
 
 Figures saved under `results_comparative/<policy>/<run-tag>/`.
