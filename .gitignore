@@ -1,1 +1,2 @@
-/kalmaning/results_mc/final_N50/trials/
+# Ignore all Monte Carlo trial data directories
+**/trials/
