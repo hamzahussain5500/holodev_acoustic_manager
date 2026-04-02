@@ -1,17 +1,17 @@
 {
   "seed": 3,
   "algorithm": "adaptive",
-  "pos_rmse": 0.44540312898406353,
-  "final_error": 0.38724580197099145,
-  "energy_Wh": 1.3888888888888593,
-  "switch_count": 5.0,
-  "avg_beacons": 2.0833333333333335,
-  "nees_pct": 97.15833333333333,
-  "nis_acoustic_pct": 95.71428571428572,
-  "crlb_eff": 0.34253207886309445,
+  "pos_rmse": 1.0983597848030875,
+  "final_error": 0.0719406443707483,
+  "energy_Wh": 10.05555555554641,
+  "switch_count": 51.0,
+  "avg_beacons": 2.011111111111111,
+  "nees_pct": 93.88555555555556,
+  "nis_acoustic_pct": 92.50493096646942,
+  "crlb_eff": 0.5991397866083316,
   "pct_active_0": 0.0,
   "pct_active_1": 0.0,
-  "pct_active_2": 0.9583333333333334,
+  "pct_active_2": 0.9944444444444445,
   "pct_active_3": 0.0,
-  "pct_active_4": 0.041666666666666664
+  "pct_active_4": 0.005555555555555556
 }

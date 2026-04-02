@@ -10,7 +10,7 @@
   "disable_currents": true,
   "trajectory": "spiral",
   "legacy": false,
-  "max_workers": 3,
+  "max_workers": 2,
   "algorithms": [
     "imu_dvl_depth",
     "imu_dvl_depth_all4",
