@@ -65,8 +65,7 @@ You can also run `adaptive_gdop`, `adaptive_weighted`, or `adaptive_v2` explicit
 
 ## Trajectory handling
 
-The EKF uses `trajectory.py` to generate waypoint paths (spiral, lawnmower, concentric, figure8). The Monte Carlo runner passes trajectory choice via EKF overrides. The saved plot
-`figures/traj_xy.png` shows the ground-truth path once per run.
+The EKF uses `trajectory.py` to generate waypoint paths. In the current `run_mc_new()` pipeline, the trajectory is hardcoded to `spiral` inside `run_trial()`. The `--trajectory` CLI flag and any YAML trajectory field are ignored by the new pipeline. The saved plot `figures/traj_xy.png` shows the ground-truth path once per run.
 
 ## Consistency metrics (NEES/NIS)
 
@@ -91,7 +90,7 @@ Only these CLI flags remain (CLI always overrides YAML):
 - `--outdir` (output folder)
 - `--duration` (seconds)
 - `--runs` (number of runs)
-- `--max-workers` (process pool size; omit or 0 to auto)
+- `--max-workers` (process pool size; omit to use value from mc_config.yaml, or set explicitly)
 
 All other settings are loaded from `mc_config.yaml`.
 

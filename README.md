@@ -124,10 +124,10 @@ Phase weights (w_obs, w_energy, w_mission):
 
 | Phase | w_obs | w_energy | w_mission |
 |-------|-------|----------|-----------|
-| survey | 0.6 | 0.2 | 0.2 |
-| cruise | 0.5 | 0.3 | 0.2 |
-| transit | 0.3 | 0.5 | 0.2 |
-| low_power | 0.2 | 0.7 | 0.1 |
+| survey | 0.85 | 0.08 | 0.07 |
+| cruise | 0.60 | 0.25 | 0.15 |
+| transit | 0.25 | 0.60 | 0.15 |
+| low_power | 0.15 | 0.75 | 0.10 |
 
 Phase is set by `--phase-schedule` or forced to `low_power` when `SOC ≤ low_power_soc`.
 Hysteresis: dwell timer resets only on actual subset changes (not on every tick). Switches if `score_best ≥ score_current + score_margin`, or fewer beacons within `power_save_tol`.
@@ -187,8 +187,11 @@ After fixing rank deficit, 0-beacon scored ~1.72 < 2-beacon ~1.84 at any SOC, ca
 **Bug 6 — V2 uncertainty gate fired immediately after subset switch** (`adaptive_modem_manager_v2.py`):
 After 4→2 switch at t~15s, `_gate_dwell` had already accumulated 1500 steps from t=0 (EKF converged early). Gate fired within 1 step (2→0 at t=16s). Fix: Reset `_gate_dwell = 0` in the switch branch.
 
+**Bug 7 — V2 gate dwell not reset on subset switch** (`adaptive_modem_manager_v2.py`):
+`_gate_dwell` reset only in the `dwell_hold` branch, not in the `switched` branch. After any subset change, the gate could fire within one step because `_gate_dwell` had pre-accumulated from before the switch. Fix: added `self._gate_dwell = 0` in the switch branch.
+
 **Enhancement — Weighted policy DEFAULT_PHASE_WEIGHTS for n=4 survey selection** (`modem_switching_validation_fixed.py`):
-Old survey weights `(0.6, 0.2, 0.2)` gave `w_obs/w_energy=3.0` < 4.2 threshold for n=4 to win over n=2 in near-degenerate geometry. Updated to `(0.85, 0.08, 0.07)`, giving `w_obs/w_energy=10.6`.
+Old survey weights `(0.6, 0.2, 0.2)` gave `w_obs/w_energy=3.0` < 4.2 threshold for n=4 to win over n=2 in near-degenerate geometry. Updated to `(0.85, 0.08, 0.07)`, giving `w_obs/w_energy=10.6`. Full updated weights: cruise `(0.60, 0.25, 0.15)`, transit `(0.25, 0.60, 0.15)`, low_power `(0.15, 0.75, 0.10)`.
 
 ### Validated comparative results (spiral, 180 s, seed 0)
 
@@ -197,20 +200,23 @@ Energy calibration: 10 Wh battery, P_base=4 W, P_beacon=3 W, drain_scale=20.
 | Policy | RMSE (m) | Switches | Active-set counts | Switch events |
 |--------|----------|----------|-------------------|---------------|
 | Manual | 0.863 | 3 | {1,2,3,4} | t=45s: 4→3, t=90s: 3→2, t=135s: 2→1 |
-| GDOP | 0.792 | 1 | {2,3} | t=55s: 3→2 (energy, SOC=0.60) |
-| Weighted | 1.017 | 2 | {0,2,4} | t=60s: 4→2 (phase), t=135s: 2→0 (battery) |
+| GDOP | 0.962 | 1 | {2,3} | t=55s: 3→2 (energy, SOC=0.60) |
+| Weighted | 1.020 | 2 | {0,2,4} | t=60s: 4→2 (phase), t=135s: 2→0 (battery) |
 | **V2** | 1.287 | **4** | {0,2,4} | t=15s: 4→2 (energy), t=99s: 2→0 (gate), t=138s: 0→2 (drift), t=153s: 2→0 (energy) |
 
 V2 demonstrates the richest switching behavior with 4 events driven by 3 independent mechanisms: energy scoring, uncertainty gate, and energy-based off at low SOC. It is the only policy that autonomously re-enables acoustics after gate-off. Higher RMSE for V2/Weighted reflects periods with 0 active beacons — the trade-off for energy savings.
 
 ### Reproducing the comparative results
 
+The easiest way is to run the comparative script, which handles all four policies and computes drain scale automatically:
+
 ```bash
 cd kalmaning/
 bash run_comparative_analysis.sh
 ```
 
-Or individually (see `README_modem_switching_validation_fixed.md` for full parameter tables):
+Or individually (see `README_modem_switching_validation_fixed.md` for full parameter tables).
+Note: the commands below use `--drain-scale 20.0` which is pre-calibrated for 180 s duration with the given battery parameters. If you change `--duration`, recompute drain scale as: `0.95 × battery_wh × 3600 / ((base_drain_w + 2 × beacon_drain_w) × duration)`.
 
 **Manual baseline:**
 ```bash
@@ -284,7 +290,7 @@ Purpose:
 
 Configuration:
 - Uses mc_config.yaml for nearly all parameters.
-- CLI overrides: --outdir, --duration, --runs, --max-workers (process pool size; omit/0 for auto).
+- CLI overrides: --outdir, --duration, --runs, --max-workers (process pool size; omit to use value from mc_config.yaml, or set explicitly).
 
 Parallelism:
 - Seeds run via a process pool; tune concurrency with --max-workers.

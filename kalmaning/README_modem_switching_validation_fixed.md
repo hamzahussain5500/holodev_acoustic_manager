@@ -157,10 +157,10 @@ f_mission(S) = clamp01( 1 - |u(S) - target_unc_xy| / target_unc_xy )
 
 | Phase | w_obs | w_energy | w_mission |
 |-------|-------|----------|-----------|
-| survey | 0.6 | 0.2 | 0.2 |
-| cruise | 0.5 | 0.3 | 0.2 |
-| transit | 0.3 | 0.5 | 0.2 |
-| low_power | 0.2 | 0.7 | 0.1 |
+| survey | 0.85 | 0.08 | 0.07 |
+| cruise | 0.60 | 0.25 | 0.15 |
+| transit | 0.25 | 0.60 | 0.15 |
+| low_power | 0.15 | 0.75 | 0.10 |
 
 Phase is determined by `phase_schedule` or forced to `low_power` when `SOC ≤ low_power_soc`.
 
@@ -296,7 +296,7 @@ if tuple(sorted(new_names)) != tuple(sorted(self.active_names)) or not self.acti
 self.active_names = new_names
 ```
 
-### Enhancement — GDOP policy: energy-aware size penalty
+### Bug 4 / Enhancement — GDOP policy: energy-aware size penalty
 
 **File:** `modem_switching_validation_fixed.py`, `GeometryPolicySelector`.
 
@@ -506,7 +506,7 @@ Expected output:
 [selector] t=45.00s active ['usv1','usv2','usv3','usv4'] -> ['usv1','usv2','usv3']
 [selector] t=90.00s active ['usv1','usv2','usv3'] -> ['usv1','usv2']
 [selector] t=135.00s active ['usv1','usv2'] -> ['usv1']
-RMSE ≈ 1.200 m
+RMSE ≈ 0.863 m
 ```
 
 ---
@@ -734,8 +734,8 @@ Energy: 10 Wh battery, P_base=4 W, P_beacon=3 W, drain_scale=20
 | Policy | RMSE (m) | Switches | Active-set counts | Switch events |
 |--------|----------|----------|-------------------|---------------|
 | **Manual** | 0.863 | 3 | {1, 2, 3, 4} | t=45s: 4→3, t=90s: 3→2, t=135s: 2→1 |
-| **GDOP** | 0.792 | 1 | {2, 3} | t=55s: 3→2 (energy, SOC=0.60) |
-| **Weighted** | 1.017 | 2 | {0, 2, 4} | t=60s: 4→2 (phase), t=135s: 2→0 (battery) |
+| **GDOP** | 0.962 | 1 | {2, 3} | t=55s: 3→2 (energy, SOC=0.60) |
+| **Weighted** | 1.020 | 2 | {0, 2, 4} | t=60s: 4→2 (phase), t=135s: 2→0 (battery) |
 | **V2** | 1.287 | **4** | {0, 2, 4} | t=15s: 4→2 (energy), t=99s: 2→0 (gate), t=138s: 0→2 (drift), t=153s: 2→0 (energy) |
 
 Validated scenario: `--traj spiral --duration 180 --seed 0`, 18 m SBL cluster at ~450 m range, 10 Wh battery.
