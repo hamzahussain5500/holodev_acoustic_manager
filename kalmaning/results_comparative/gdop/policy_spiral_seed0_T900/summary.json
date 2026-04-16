@@ -1,5 +1,5 @@
 {
-  "rmse_pos": 0.7846406273071266,
-  "final_pos_err": 1.657445108740752,
+  "rmse_pos": 0.6929087314867635,
+  "final_pos_err": 0.1913520598275862,
   "out_dir": "results_comparative/gdop/policy_spiral_seed0_T900"
 }

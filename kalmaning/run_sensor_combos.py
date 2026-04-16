@@ -1,83 +1,113 @@
+import os
+import sys
 import numpy as np
+
+# Fix mpl_toolkits namespace conflict: system dist-packages ships a stale
+# version that fails to import with the pip-installed matplotlib.  We must
+# (1) remove the system path, (2) clear any cached mpl_toolkits refs, and
+# (3) force reimport from the pip location.
+sys.path = [p for p in sys.path if "/usr/lib/python3/dist-packages" not in p]
+for _k in list(sys.modules.keys()):
+    if "mpl_toolkits" in _k:
+        del sys.modules[_k]
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers '3d' projection
 import csv
 
 from current_acoustic_EKF_patched import run_single_trial
 from uncertainty_utils import covariance_ellipse_points
 
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results_sensor_combos")
+
+
+# Spiral parameters matching the Monte Carlo runs (current_acoustic_EKF_patched.py defaults)
+SPIRAL_CFG = {
+    "trajectory": "spiral",
+    "spiral_center": (200.0, -200.0),
+    "spiral_min_radius": 20.0,
+    "spiral_max_radius": 50.0,
+    "spiral_turns": 6,
+    "spiral_points_per_rev": 250,
+    "spiral_z_start": -5.0,
+    "spiral_z_end": -150.0,
+}
 
 # Sensor combinations to evaluate (all with spiral trajectory)
 COMBOS = [
     {
         "name": "imu_only",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": False,
             "use_depth_update": False,
             "use_acoustic_updates": False,
-            "trajectory": "spiral",
         },
         "targets": None,
     },
     {
         "name": "imu_dvl",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": False,
             "use_acoustic_updates": False,
-            "trajectory": "spiral",
         },
         "targets": None,
     },
     {
         "name": "imu_dvl_depth",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": True,
             "use_acoustic_updates": False,
-            "trajectory": "spiral",
         },
         "targets": None,
     },
     {
         "name": "imu_dvl_depth_usv1",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": True,
             "use_acoustic_updates": True,
-            "trajectory": "spiral",
         },
         "targets": ["usv1"],
     },
     {
         "name": "imu_dvl_depth_usv1_usv2",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": True,
             "use_acoustic_updates": True,
-            "trajectory": "spiral",
         },
         "targets": ["usv1", "usv2"],
     },
     {
         "name": "imu_dvl_depth_usv1_usv2_usv3",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": True,
             "use_acoustic_updates": True,
-            "trajectory": "spiral",
         },
         "targets": ["usv1", "usv2", "usv3"],
     },
+
     {
         "name": "imu_dvl_depth_usv1_usv2_usv3_usv4",
         "config": {
+            **SPIRAL_CFG,
             "use_dvl_update": True,
             "use_depth_update": True,
             "use_acoustic_updates": True,
-            "trajectory": "spiral",
         },
         "targets": ["usv1", "usv2", "usv3", "usv4"],
-    },
+    }
 ]
 
 
@@ -159,9 +189,11 @@ def print_metrics_summary(results):
         )
 
 
-def write_metrics_csv(results, path="sensor_combo_summary.csv"):
+def write_metrics_csv(results, path=None):
     if not results:
         return
+    if path is None:
+        path = os.path.join(RESULTS_DIR, "sensor_combo_summary.csv")
 
     fields = [
         "combo",
@@ -239,10 +271,21 @@ def write_metrics_csv(results, path="sensor_combo_summary.csv"):
     print(f"Saved metrics to {path}")
 
 
-def plot_comparisons(results):
+def plot_comparisons(results, out_dir=None):
     if not results:
         print("No results to plot.")
         return
+
+    if out_dir is None:
+        out_dir = RESULTS_DIR
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _save(fig, name):
+        for ext in ("png", "pdf"):
+            fig.savefig(os.path.join(out_dir, f"{name}.{ext}"),
+                        dpi=300, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        print(f"  Saved {name}")
 
     true_ref = results[0]["trial"]["timeseries"]["true_pos"]
     t_ref = results[0]["trial"]["timeseries"]["t"]
@@ -270,8 +313,8 @@ def plot_comparisons(results):
     ]
 
     # Depth vs time (simplified set)
-    plt.figure()
-    plt.plot(t_ref, true_ref[:, 2], color=colors["truth"], linewidth=2.0, label="Ground truth")
+    fig, ax = plt.subplots()
+    ax.plot(t_ref, true_ref[:, 2], color=colors["truth"], linewidth=2.0, label="Ground truth")
     for name in primary_names:
         tr = get_trial(name)
         if tr is None:
@@ -284,15 +327,17 @@ def plot_comparisons(results):
             "imu_dvl_depth": "IMU+DVL+Depth",
             "imu_dvl_depth_usv1_usv2_usv3_usv4": "IMU+DVL+Depth+Acoustic",
         }.get(name, name)
-        plt.plot(t, est[:, 2], color=colors.get(name, "gray"), linewidth=1.6, label=label)
-    plt.xlabel("time [s]")
-    plt.ylabel("z [m]")
-    plt.title("Depth vs time (spiral)")
-    plt.legend()
+        ax.plot(t, est[:, 2], color=colors.get(name, "gray"), linewidth=1.6, label=label)
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("z [m]")
+    ax.set_title("Depth vs time (spiral)")
+    ax.legend()
+    fig.tight_layout()
+    _save(fig, "depth_vs_time")
 
     # XY trajectory comparison (qualitative)
-    plt.figure()
-    plt.plot(true_ref[:, 0], true_ref[:, 1], color=colors["truth"], linewidth=2.0, label="Ground truth")
+    fig, ax = plt.subplots()
+    ax.plot(true_ref[:, 0], true_ref[:, 1], color=colors["truth"], linewidth=2.0, label="Ground truth")
     for name in primary_names:
         tr = get_trial(name)
         if tr is None:
@@ -303,15 +348,17 @@ def plot_comparisons(results):
             "imu_dvl_depth": "IMU+DVL+Depth",
             "imu_dvl_depth_usv1_usv2_usv3_usv4": "IMU+DVL+Depth+Acoustic",
         }.get(name, name)
-        plt.plot(est[:, 0], est[:, 1], color=colors.get(name, "gray"), linewidth=1.6, label=label)
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title("XY trajectory comparison (spiral)")
-    plt.axis("equal")
-    plt.legend()
+        ax.plot(est[:, 0], est[:, 1], color=colors.get(name, "gray"), linewidth=1.6, label=label)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title("XY trajectory comparison (spiral)")
+    ax.set_aspect("equal")
+    ax.legend()
+    fig.tight_layout()
+    _save(fig, "traj_xy")
 
     # Position error magnitude vs time (reduced set)
-    plt.figure()
+    fig, ax = plt.subplots()
     for name in primary_names:
         tr = get_trial(name)
         if tr is None:
@@ -326,11 +373,13 @@ def plot_comparisons(results):
             "imu_dvl_depth": "IMU+DVL+Depth",
             "imu_dvl_depth_usv1_usv2_usv3_usv4": "IMU+DVL+Depth+Acoustic",
         }.get(name, name)
-        plt.plot(t[:n], err, color=colors.get(name, "gray"), linewidth=1.6, label=label)
-    plt.xlabel("time [s]")
-    plt.ylabel("||position error|| [m]")
-    plt.title("Position error vs time")
-    plt.legend()
+        ax.plot(t[:n], err, color=colors.get(name, "gray"), linewidth=1.6, label=label)
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("||position error|| [m]")
+    ax.set_title("Position error vs time")
+    ax.legend()
+    fig.tight_layout()
+    _save(fig, "pos_error_vs_time")
 
     # 3D trajectory (qualitative) showing acoustic localization
     best = get_trial("imu_dvl_depth_usv1_usv2_usv3_usv4")
@@ -346,6 +395,7 @@ def plot_comparisons(results):
         ax.set_zlabel("z [m]")
         ax.set_title("3D spiral trajectory (acoustic localization)")
         ax.legend()
+        _save(fig, "traj_3d")
 
     # 2D uncertainty ellipses for best configuration (acoustic)
     best = get_trial("imu_dvl_depth_usv1_usv2_usv3_usv4")
@@ -354,31 +404,33 @@ def plot_comparisons(results):
         est = ts["est_pos"]
         Ppos = ts.get("Ppos")
         if Ppos is not None and len(Ppos) > 0:
-            plt.figure()
-            plt.plot(est[:, 0], est[:, 1], color=colors["imu_dvl_depth_usv1_usv2_usv3_usv4"], linewidth=1.6, label="IMU+DVL+Depth+Acoustic")
-            plt.plot(true_ref[:, 0], true_ref[:, 1], color=colors["truth"], linewidth=2.0, label="Ground truth")
+            fig, ax = plt.subplots()
+            ax.plot(est[:, 0], est[:, 1], color=colors["imu_dvl_depth_usv1_usv2_usv3_usv4"], linewidth=1.6, label="IMU+DVL+Depth+Acoustic")
+            ax.plot(true_ref[:, 0], true_ref[:, 1], color=colors["truth"], linewidth=2.0, label="Ground truth")
             num_ellipses = 6
             idxs = np.linspace(0, len(est) - 1, num_ellipses, dtype=int)
             for idx in idxs:
                 P_xy = Ppos[idx][0:2, 0:2]
                 mean_xy = est[idx, 0:2]
                 ex, ey = covariance_ellipse_points(P_xy, mean_xy, chi2_val=5.991, num_points=80)
-                plt.plot(ex, ey, color=colors["imu_dvl_depth_usv1_usv2_usv3_usv4"], alpha=0.5, linewidth=1.0)
-            plt.xlabel("x [m]")
-            plt.ylabel("y [m]")
-            plt.title("Uncertainty ellipses (95%) — best config")
-            plt.axis("equal")
-            plt.legend()
+                ax.plot(ex, ey, color=colors["imu_dvl_depth_usv1_usv2_usv3_usv4"], alpha=0.5, linewidth=1.0)
+            ax.set_xlabel("x [m]")
+            ax.set_ylabel("y [m]")
+            ax.set_title("Uncertainty ellipses (95%) — best config")
+            ax.set_aspect("equal")
+            ax.legend()
+            fig.tight_layout()
+            _save(fig, "uncertainty_ellipses")
 
-    plt.tight_layout()
-    plt.show()
+    print(f"\nAll figures saved to {out_dir}/")
 
 
 def main():
+    os.makedirs(RESULTS_DIR, exist_ok=True)
     results = collect_results(seed=123)
     print_metrics_summary(results)
-    write_metrics_csv(results)
-    plot_comparisons(results)
+    write_metrics_csv(results, path=os.path.join(RESULTS_DIR, "sensor_combo_summary.csv"))
+    plot_comparisons(results, out_dir=RESULTS_DIR)
 
 
 if __name__ == "__main__":
